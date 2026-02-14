@@ -1,0 +1,12 @@
+.env
+fullcode.py
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+downloads/
+nft_gift_monitor.session
+monitor.log
