@@ -198,21 +198,22 @@ class NFTMonitor:
                 if not res or not hasattr(res, 'gifts'): return
                 for gift in res.gifts:
                     listing_id = f"{gift.slug}-{gift.num}"
-                    uid = gift.owner_id.user_id if hasattr(gift, 'owner_id') and isinstance(gift.owner_id, types.PeerUser) else None
                     
-                    if listing_id not in self.seen_listings:
-                        self.seen_listings.add(listing_id)
-                        self.listing_timestamps[listing_id] = datetime.now()
+                    if listing_id in self.seen_listings:
+                        if not self.is_bootstrapping:
+                            break # Stop: we hit already seen listings, further items are older
+                        continue
                         
+                    self.seen_listings.add(listing_id)
+                    self.listing_timestamps[listing_id] = datetime.now()
+                    
+                    if not self.is_bootstrapping:
+                        uid = gift.owner_id.user_id if hasattr(gift, 'owner_id') and isinstance(gift.owner_id, types.PeerUser) else None
                         if uid:
-                            async with self.author_lock:
-                                if self.is_bootstrapping:
-                                    self.seen_authors.add(uid)
-                                elif uid not in self.seen_authors:
-                                    self.seen_authors.add(uid)
-                                    self.current_scan_found += 1
-                                    asyncio.create_task(self.immediate_alert(gift, gift_name, uid))
-            except: pass
+                            self.current_scan_found += 1
+                            asyncio.create_task(self.immediate_alert(gift, gift_name, uid))
+            except Exception as e:
+                pass
 
     async def immediate_alert(self, gift, gift_name, uid):
         sent_msg = None
@@ -237,7 +238,7 @@ class NFTMonitor:
             btns = [[p_btn], [Button.inline("👤 Взять в роботу", data=f"take_{uid}".encode()), Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]]
             await sent_msg.edit(final_text, buttons=btns, link_preview=True)
             self.stats['alerts'] += 1
-        except:
+        except Exception as e:
             if sent_msg:
                 try: await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id])
                 except: pass
@@ -258,7 +259,7 @@ class NFTMonitor:
             await self.client.start(); await self.bot_client.start(bot_token=config.BOT_TOKEN)
             self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=re.compile(b"ban_.*")))
             self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=re.compile(b"take_.*")))
-            self.bot_client.add_event_handler(self.handle_prof_callback, events.CallbackQuery(pattern=re.compile(re.compile(b"prof_.*"))))
+            self.bot_client.add_event_handler(self.handle_prof_callback, events.CallbackQuery(pattern=re.compile(b"prof_.*")))
             self.bot_client.add_event_handler(self.handle_start, events.NewMessage(pattern='/start'))
             
             gifts = [{'id': g.id, 'title': g.title} for g in (await self.client(GetStarGiftsRequest(hash=0))).gifts if g.title in config.TARGET_GIFT_NAMES]
