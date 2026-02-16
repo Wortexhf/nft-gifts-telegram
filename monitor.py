@@ -188,18 +188,21 @@ class NFTMonitor:
             d, ts = self.owner_cache[uid]
             if datetime.now() - ts < timedelta(hours=12): return d
         
-        entity = await self.safe_request(self.client, self.client.get_entity, owner_id)
-        if not entity or not isinstance(entity, types.User) or entity.bot:
+        # Resolve entity strictly as User
+        try:
+            entity = await self.client.get_entity(owner_id)
+            if not isinstance(entity, types.User) or entity.bot:
+                self.owner_cache[uid] = (None, datetime.now()); return None
+            
+            # Verify accessibility (GetFullUser)
+            await self.client(GetFullUserRequest(entity))
+            
+            name = ((entity.first_name or "") + " " + (entity.last_name or "")).strip() or "Unknown"
+            data = {'id': uid, 'name': name.replace('[', '').replace(']', ''), 'username': entity.username}
+            self.owner_cache[uid] = (data, datetime.now())
+            return data
+        except:
             self.owner_cache[uid] = (None, datetime.now()); return None
-        
-        # Verify accessibility like in zrazok
-        try: await self.client(GetFullUserRequest(entity))
-        except: self.owner_cache[uid] = (None, datetime.now()); return None
-
-        name = ((entity.first_name or "") + " " + (entity.last_name or "")).strip() or "Unknown"
-        data = {'id': uid, 'name': name.replace('[', '').replace(']', ''), 'username': entity.username}
-        self.owner_cache[uid] = (data, datetime.now())
-        return data
 
     async def fetch_and_process(self, gift_id, gift_name, semaphore):
         async with semaphore:
@@ -221,8 +224,8 @@ class NFTMonitor:
 
     async def immediate_alert(self, gift, gift_name):
         """Send link immediately, then resolve info and edit (Fast logic)"""
+        sent_msg = None
         try:
-            # 1. Extraction user_id (Logic from zrazok)
             uid = None
             if hasattr(gift, 'owner_id') and gift.owner_id:
                 oid = gift.owner_id
@@ -232,24 +235,31 @@ class NFTMonitor:
             link = f"https://t.me/nft/{gift.slug}-{gift.num}"
             price = f"\n💰 {getattr(gift.price, 'amount', gift.price)} ⭐️" if hasattr(gift, 'price') and gift.price else ""
             
-            # 2. Initial message (Fast)
+            # 1. Initial message (Fast)
             msg_text = f"{link}\n\n🎁 **{gift_name}** `#{gift.num}`{price}\n👤 ID: {uid}"
-            sent_msg = await self.safe_request(self.bot_client, self.bot_client.send_message, config.GROUP_ID, msg_text, link_preview=True)
+            sent_msg = await self.bot_client.send_message(config.GROUP_ID, msg_text, link_preview=True)
             if not sent_msg: return
 
-            # 3. Resolve profile and edit (Rich info)
+            # 2. Resolve profile
             user_data = await self.check_owner(uid)
+            
+            # 3. STRICT FILTER: If profile inaccessible or user is banned - DELETE MESSAGE
             if not user_data or uid in self.banned_users:
-                if uid in self.banned_users: await sent_msg.delete()
+                await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id])
                 return
 
+            # 4. Success - Update with buttons
             u_link = f"https://t.me/{user_data['username']}" if user_data['username'] else f"tg://user?id={uid}"
             final_text = f"{link}\n\n🎁 **{gift_name}** `#{gift.num}`{price}\n👤 {user_data['name']}"
             btns = [[Button.url("🔗 Профиль", u_link)], [Button.inline("👤 Взять в работу", data=f"take_{uid}"), Button.inline("🚫 Заблокировать", data=f"ban_{uid}")]]
             
-            await self.safe_request(self.bot_client, sent_msg.edit, final_text, buttons=btns, link_preview=True)
+            await sent_msg.edit(final_text, buttons=btns, link_preview=True)
             self.stats['alerts'] += 1
-        except: pass
+        except Exception as e:
+            if sent_msg:
+                try: await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id])
+                except: pass
+            logger.debug(f"Alert error: {e}")
 
     async def scan_all(self, gifts):
         random.shuffle(gifts)
