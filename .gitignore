@@ -7,7 +7,8 @@ __pycache__/
 env/
 venv/
 downloads/
-nft_gift_monitor.session
+*.session
+*.session-journal
 monitor.log
 data/
 *.log
