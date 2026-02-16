@@ -1,2 +1,2 @@
-Telethon==1.38.1
+git+https://github.com/LonamiWebs/Telethon.git
 python-dotenv==1.0.1
