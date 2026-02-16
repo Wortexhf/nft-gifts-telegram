@@ -725,8 +725,7 @@ class NFTMonitor:
                         pass
         
         except KeyboardInterrupt:
-            logger.info("
-⏹ Остановлено")
+            logger.info("\n⏹ Остановлено")
         except Exception as e:
             logger.error(f"❌ Критическая ошибка: {e}")
             traceback.print_exc()
