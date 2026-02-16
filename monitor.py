@@ -8,6 +8,7 @@ from typing import Dict, List, Tuple, Optional, Set
 from collections import deque
 
 from telethon import TelegramClient
+from telethon.tl.custom import Button
 from telethon.errors import (
     FloodWaitError, BadRequestError, RPCError, NetworkMigrateError, 
     PhoneMigrateError, TimedOutError, AuthKeyError
@@ -373,7 +374,7 @@ class NFTMonitor:
             
             username = None
             if hasattr(user, 'username') and user.username:
-                # Return proper markdown link for username
+                # Return proper markdown link for username with full URL
                 username = f"[@{user.username}](https://t.me/{user.username})"
             else:
                 first_name = getattr(user, 'first_name', 'Unknown') or 'Unknown'
@@ -550,6 +551,9 @@ class NFTMonitor:
 
                     msg = f"**{listing['title']}** `#{listing['number']}`{price_text}\n👤 {owner}\n{link}"
                     
+                    # Create button
+                    buy_button = Button.url("Купить", link)
+                    
                     await asyncio.sleep(random.uniform(1.5, 3.5))
                     
                     await self.safe_request(
@@ -559,6 +563,7 @@ class NFTMonitor:
                         msg,
                         link_preview=True,
                         parse_mode='Markdown',
+                        buttons=[buy_button],
                         critical=False
                     )
                     self.stats['alerts'] += 1
