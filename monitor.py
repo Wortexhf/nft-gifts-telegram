@@ -234,13 +234,17 @@ class NFTMonitor:
                     
                     if not self.is_bootstrapping:
                         uid = gift.owner_id.user_id if hasattr(gift, 'owner_id') and isinstance(gift.owner_id, types.PeerUser) else None
+                        logger.info(f"🆕 Знайдено новий лот: {gift_name} #{gift.num}")
                         if uid:
                             self.current_scan_found += 1
                             asyncio.create_task(self.immediate_alert(gift, gift_name, uid))
+                        else:
+                            logger.warning(f"⚠️ Лот {listing_id} не має owner_id")
             except FloodWaitError as e:
                 logger.warning(f"⚠️ FLOOD: Очікування {e.seconds}с для {gift_name}")
                 await asyncio.sleep(e.seconds + 1)
-            except Exception: pass
+            except Exception as e:
+                logger.debug(f"Помилка сканування {gift_name}: {e}")
 
     async def immediate_alert(self, gift, gift_name, uid):
         sent_msg = None
@@ -255,6 +259,7 @@ class NFTMonitor:
 
             user_data = await self.check_owner(uid)
             if not user_data or uid in self.banned_users:
+                logger.info(f"🚫 Пропущено (бан або немає даних): {uid}")
                 await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id]); return
 
             # Formatting final message
@@ -278,8 +283,10 @@ class NFTMonitor:
             ]
             
             await sent_msg.edit(final_text, buttons=btns, link_preview=True)
+            logger.info(f"✅ Алерт надіслано: {gift_name} #{gift.num} для {u_name}")
             self.stats['alerts'] += 1
-        except Exception:
+        except Exception as e:
+            logger.error(f"Помилка алерту: {e}")
             if sent_msg:
                 try: await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id])
                 except: pass
@@ -287,11 +294,17 @@ class NFTMonitor:
     async def scan_all(self, gifts):
         random.shuffle(gifts)
         sem = asyncio.Semaphore(10); batch = 5 
+        start_time = datetime.now()
         for i in range(0, len(gifts), batch):
-            logger.info(f"  > [{i+batch if i+batch<len(gifts) else len(gifts)}/{len(gifts)}] Сканування...")
-            tasks = [self.fetch_and_process(g['id'], g['title'], sem) for g in gifts[i:i+batch]]
+            current_batch = gifts[i:i+batch]
+            batch_titles = ", ".join([g['title'].split()[-1] for g in current_batch])
+            logger.info(f"  > [{i+len(current_batch)}/{len(gifts)}] Сканування: {batch_titles}...")
+            tasks = [self.fetch_and_process(g['id'], g['title'], sem) for g in current_batch]
             await asyncio.gather(*tasks)
             await asyncio.sleep(random.uniform(0.3, 0.7))
+        
+        duration = (datetime.now() - start_time).total_seconds()
+        logger.info(f"🏁 Цикл завершено за {duration:.1f}с. Всього лістингів в базі: {len(self.seen_listings)}")
 
     async def run(self):
         logger.info("="*60 + "\nNFT MONITOR by wortexhf [ULTRA FAST]\n" + "="*60)
