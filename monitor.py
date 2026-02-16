@@ -596,7 +596,7 @@ class NFTMonitor:
     async def send_all_alerts_optimized(
         self,
         client: TelegramClient,
-        chat_entity,
+        chat_entity_id,
         listings: List[dict]
     ) -> None:
         if not listings:
@@ -659,11 +659,11 @@ class NFTMonitor:
                     
                     await asyncio.sleep(random.uniform(1.5, 3.5))
                     
-                    # USE BOT CLIENT FOR SENDING
+                    # USE BOT CLIENT FOR SENDING with ID
                     await self.safe_request(
                         self.bot_client,
                         self.bot_client.send_message,
-                        chat_entity,
+                        chat_entity_id,
                         msg,
                         link_preview=True,
                         parse_mode='Markdown',
@@ -741,12 +741,12 @@ class NFTMonitor:
             await asyncio.sleep(random.uniform(3, 6))
             
             try:
-                # Use user client to resolve entity, but pass to bot too if needed
-                chat_entity = await self.safe_request(self.client, self.client.get_entity, config.GROUP_INVITE, critical=True)
-            except:
-                chat_entity = await self.safe_request(self.client, self.client.get_entity, config.GROUP_ID, critical=True)
-            
-            logger.info(f"✓ Группа подключена")
+                # Use user client to resolve entity, just to check access
+                await self.safe_request(self.client, self.client.get_entity, config.GROUP_ID, critical=True)
+                logger.info(f"✓ Группа подключена")
+            except Exception as e:
+                logger.error(f"❌ Ошибка подключения к группе (User): {e}")
+
             await asyncio.sleep(random.uniform(4, 8))
             
             # --- TEST BUTTONS START ---
@@ -755,11 +755,11 @@ class NFTMonitor:
                     Button.inline("👤 Взять в работу (Тест)", data=b"take_0"),
                     Button.inline("🚫 Заблокировать (Тест)", data=b"ban_0")
                 ]
-                # Send test message via BOT client
+                # Send test message via BOT client using GROUP_ID directly
                 await self.safe_request(
                     self.bot_client,
                     self.bot_client.send_message,
-                    chat_entity,
+                    config.GROUP_ID, # Use ID directly!
                     "🔔 **Тест кнопок бота**\nПеревірка відображення клавіатури.",
                     buttons=test_buttons,
                     critical=False
@@ -815,7 +815,8 @@ class NFTMonitor:
                             self.seen_listings.add(listing_id)
                             self.listing_timestamps[listing_id] = now
                         
-                        await self.send_all_alerts_optimized(self.client, chat_entity, new_listings)
+                        # Pass config.GROUP_ID directly to the bot alert function
+                        await self.send_all_alerts_optimized(self.client, config.GROUP_ID, new_listings)
                     else:
                         logger.info("⏸ Новых нет")
                     
