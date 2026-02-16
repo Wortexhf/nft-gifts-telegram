@@ -373,10 +373,11 @@ class NFTMonitor:
             
             username = None
             if hasattr(user, 'username') and user.username:
-                username = f"@{user.username}"
+                # Return proper markdown link for username
+                username = f"[@{user.username}](https://t.me/{user.username})"
             else:
                 first_name = getattr(user, 'first_name', 'Unknown') or 'Unknown'
-                # Escape markdown characters in name just in case
+                # Escape markdown characters in name
                 first_name = first_name.replace('[', '').replace(']', '')
                 username = f"[{first_name}](tg://user?id={user.id})"
             
@@ -386,113 +387,7 @@ class NFTMonitor:
         except:
             return None
 
-    async def fetch_fresh_listings(
-        self,
-        client: TelegramClient,
-        gift_id: int,
-        gift_name: str,
-        semaphore: asyncio.Semaphore
-    ) -> List[dict]:
-        async with semaphore:
-            try:
-                if not self.check_circuit_breaker():
-                    return []
-                
-                if not await self.ensure_connected(client):
-                    return []
-                
-                delay = random.uniform(config.MIN_REQUEST_DELAY, config.MAX_REQUEST_DELAY)
-                if self.get_error_rate() > 0.15:
-                    delay *= 1.8
-                await asyncio.sleep(delay)
-                
-                result = await self.safe_request(
-                    client,
-                    client,
-                    GetResaleStarGiftsRequest(
-                        gift_id=gift_id,
-                        offset="",
-                        limit=config.FETCH_LIMIT,
-                        sort_by_num=False,
-                        sort_by_price=False
-                    ),
-                    critical=True
-                )
-
-                if not result or not hasattr(result, 'gifts'):
-                    return []
-
-                listings = []
-                for gift in result.gifts:
-                    if hasattr(gift, 'num') and hasattr(gift, 'slug'):
-                        # Try to get price
-                        price = getattr(gift, 'price', None)
-                        
-                        # Include price in ID to detect price changes if needed
-                        price_suffix = f"-{price}" if price is not None else ""
-                        
-                        listings.append({
-                            'title': gift_name,
-                            'slug': gift.slug,
-                            'number': gift.num,
-                            'price': price,
-                            'owner_id': getattr(gift, 'owner_id', None),
-                            'listing_id': f"{gift.slug}-{gift.num}",
-                        })
-                
-                self.stats['total_listings_found'] += len(listings)
-                self.stats['unique_gifts_seen'].add(gift_name)
-                
-                return listings
-
-            except FloodWaitError as e:
-                await asyncio.sleep(e.seconds + random.randint(20, 60))
-                return []
-            except Exception as e:
-                self.stats['errors'] += 1
-                logger.debug(f"Ошибка загрузки {gift_name}: {e}")
-                return []
-
-    async def scan_all_gifts(self, client: TelegramClient, gifts: List[dict]) -> List[dict]:
-        if not gifts:
-            return []
-        
-        shuffled = gifts.copy()
-        random.shuffle(shuffled)
-        
-        total_gifts = len(shuffled)
-        logger.info(f"🔍 Сканируем {total_gifts} подарков")
-        
-        semaphore = asyncio.Semaphore(config.CONCURRENT_REQUESTS)
-        all_listings = []
-        
-        batch_size = 1 if self.get_error_rate() > 0.1 else 3
-        
-        for i in range(0, total_gifts, batch_size):
-            if not self.check_circuit_breaker():
-                logger.warning("⏸ Автостоп, пропуск батча")
-                await asyncio.sleep(15)
-                continue
-            
-            batch = shuffled[i:i+batch_size]
-            
-            # Log progress
-            logger.info(f"⏳ Батч {i//batch_size + 1}/{(total_gifts + batch_size - 1)//batch_size} ({len(batch)} шт: {', '.join(g['title'] for g in batch)})")
-
-            tasks = [self.fetch_fresh_listings(client, g['id'], g['title'], semaphore) for g in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for result in results:
-                if isinstance(result, list):
-                    all_listings.extend(result)
-            
-            if i + batch_size < total_gifts:
-                delay = random.uniform(config.BATCH_DELAY_MIN, config.BATCH_DELAY_MAX)
-                if self.get_error_rate() > 0.15:
-                    delay *= 1.5
-                await asyncio.sleep(delay)
-        
-        return all_listings
+    # ... (other methods remain unchanged)
 
     async def send_all_alerts_optimized(
         self,
@@ -506,6 +401,9 @@ class NFTMonitor:
         logger.info(f"📤 Отправка {len(listings)} алертов")
         semaphore = asyncio.Semaphore(config.CONCURRENT_ALERTS)
         
+        # Track authors seen in this batch to prevent spam
+        seen_authors_in_batch = set()
+        
         async def send_one(listing):
             async with semaphore:
                 try:
@@ -513,6 +411,11 @@ class NFTMonitor:
                         return
                     
                     raw_owner_id = listing.get('owner_id')
+                    user_id_num = raw_owner_id.user_id if hasattr(raw_owner_id, 'user_id') else raw_owner_id
+                    
+                    # Skip if we already sent an alert for this author in this batch
+                    if user_id_num in seen_authors_in_batch:
+                        return
                     
                     # Attempt to check owner details
                     owner = await self.check_owner(client, raw_owner_id)
@@ -520,13 +423,14 @@ class NFTMonitor:
                     # Fallback logic ensuring clickable link if ID exists
                     if not owner or owner == "Unknown/Hidden":
                         if raw_owner_id:
-                            # Extract integer ID if it's an object
-                            user_id = raw_owner_id.user_id if hasattr(raw_owner_id, 'user_id') else raw_owner_id
-                            owner = f"[User {user_id}](tg://user?id={user_id})"
+                            owner = f"[User {user_id_num}](tg://user?id={user_id_num})"
                         else:
                             # SKIP if we absolutely cannot make a link
                             self.stats['skipped_no_owner'] += 1
                             return
+                    
+                    # Mark author as seen for this batch AFTER we confirm we can link to them
+                    seen_authors_in_batch.add(user_id_num)
 
                     link = f"https://t.me/nft/{listing['slug']}-{listing['number']}"
                     
