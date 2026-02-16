@@ -46,6 +46,7 @@ class NFTMonitor:
         }
         self.listings_history = []
         
+        # User Client (for scanning Star Gifts)
         self.client = TelegramClient(
             config.SESSION_NAME,
             config.API_ID,
@@ -56,6 +57,13 @@ class NFTMonitor:
             timeout=60,
             request_retries=3,
             flood_sleep_threshold=180
+        )
+        
+        # Bot Client (for sending alerts with buttons)
+        self.bot_client = TelegramClient(
+            "bot_session", # Separate session file for bot
+            config.API_ID,
+            config.API_HASH
         )
 
     def load_banned_users(self):
@@ -618,8 +626,8 @@ class NFTMonitor:
                     if user_id_num in seen_authors_in_batch:
                         return
                     
-                    # Attempt to check owner details
-                    owner = await self.check_owner(client, raw_owner_id)
+                    # Attempt to check owner details (Using user client to scan)
+                    owner = await self.check_owner(self.client, raw_owner_id)
                     
                     # Fallback logic ensuring clickable link if ID exists
                     if not owner or owner == "Unknown/Hidden":
@@ -651,9 +659,10 @@ class NFTMonitor:
                     
                     await asyncio.sleep(random.uniform(1.5, 3.5))
                     
+                    # USE BOT CLIENT FOR SENDING
                     await self.safe_request(
-                        client,
-                        client.send_message,
+                        self.bot_client,
+                        self.bot_client.send_message,
                         chat_entity,
                         msg,
                         link_preview=True,
@@ -701,15 +710,23 @@ class NFTMonitor:
         stats_saver = None
         
         try:
+            # Start User Client
             await self.client.start()
             
+            # Start Bot Client
+            if not config.BOT_TOKEN:
+                logger.error("❌ BOT_TOKEN не знайдено! Кнопки не будуть працювати.")
+                return
+            await self.bot_client.start(bot_token=config.BOT_TOKEN)
+            logger.info("✓ Бот підключено")
+            
             # Register callback handler for ban and take buttons
-            self.client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=b"ban_"))
-            self.client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=b"take_"))
+            self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=b"ban_"))
+            self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=b"take_"))
             
             await asyncio.sleep(random.uniform(3, 6))
             me = await self.client.get_me()
-            logger.info(f"✓ Подключено: {me.first_name}")
+            logger.info(f"✓ Юзер підключено: {me.first_name}")
             self.health_status["connected"] = True
             
             keepalive = asyncio.create_task(self.keepalive_task(self.client))
@@ -724,6 +741,7 @@ class NFTMonitor:
             await asyncio.sleep(random.uniform(3, 6))
             
             try:
+                # Use user client to resolve entity, but pass to bot too if needed
                 chat_entity = await self.safe_request(self.client, self.client.get_entity, config.GROUP_INVITE, critical=True)
             except:
                 chat_entity = await self.safe_request(self.client, self.client.get_entity, config.GROUP_ID, critical=True)
@@ -737,9 +755,10 @@ class NFTMonitor:
                     Button.inline("👤 Взять в работу (Тест)", data=b"take_0"),
                     Button.inline("🚫 Заблокировать (Тест)", data=b"ban_0")
                 ]
+                # Send test message via BOT client
                 await self.safe_request(
-                    self.client,
-                    self.client.send_message,
+                    self.bot_client,
+                    self.bot_client.send_message,
                     chat_entity,
                     "🔔 **Тест кнопок бота**\nПеревірка відображення клавіатури.",
                     buttons=test_buttons,
@@ -872,6 +891,7 @@ class NFTMonitor:
             
             try:
                 await self.client.disconnect()
+                await self.bot_client.disconnect()
             except:
                 pass
             
