@@ -16,7 +16,6 @@ from telethon.errors import (
 )
 from telethon.tl.functions.payments import GetResaleStarGiftsRequest, GetStarGiftsRequest
 from telethon.tl.functions.updates import GetStateRequest
-from telethon.tl.functions.users import GetFullUserRequest
 
 import config
 from utils import logger
@@ -469,7 +468,6 @@ class NFTMonitor:
             return None
         
         try:
-            # Extract user ID and ensure it's a PeerUser
             if hasattr(owner_id, 'user_id'):
                 user_id = owner_id.user_id
             elif isinstance(owner_id, int):
@@ -486,24 +484,16 @@ class NFTMonitor:
             if not await self.ensure_connected(client):
                 return None
             
-            await asyncio.sleep(random.uniform(0.3, 0.8))
+            await asyncio.sleep(random.uniform(0.2, 0.5))
             
-            # Use get_entity to resolve the user
             entity = await self.safe_request(client, client.get_entity, owner_id, max_retries=2, critical=False)
             
             # STRICT FILTER: Only resolve real users, skip channels/broadcasts/bots
             if not entity or not isinstance(entity, types.User) or entity.bot:
+                logger.debug(f"👤 Skip lot owner {user_id}: not a user profile")
                 self.owner_cache[user_id] = (None, datetime.now())
                 return None
             
-            # Verify profile accessibility by getting full info (like in scrape_telegram_nft.py)
-            try:
-                await self.safe_request(client, client, GetFullUserRequest(entity), max_retries=1)
-            except:
-                # If we can't get full user info, the profile might be inaccessible
-                self.owner_cache[user_id] = (None, datetime.now())
-                return None
-
             display_name = entity.first_name or "Unknown"
             if entity.last_name:
                 display_name += f" {entity.last_name}"
@@ -522,35 +512,27 @@ class NFTMonitor:
             logger.debug(f"Error in check_owner: {e}")
             return None
 
-    async def fetch_fresh_listings(
+    async def fetch_and_process_listing(
         self,
         client: TelegramClient,
         gift_id: int,
         gift_name: str,
         semaphore: asyncio.Semaphore
     ) -> List[dict]:
+        """Fetches listings and returns them for overall scan logic, but alerts on-the-fly inside"""
         async with semaphore:
             try:
-                if not self.check_circuit_breaker():
+                if not self.check_circuit_breaker() or not await self.ensure_connected(client):
                     return []
                 
-                if not await self.ensure_connected(client):
-                    return []
-                
-                delay = random.uniform(config.MIN_REQUEST_DELAY, config.MAX_REQUEST_DELAY)
-                if self.get_error_rate() > 0.15:
-                    delay *= 1.8
-                await asyncio.sleep(delay)
+                await asyncio.sleep(random.uniform(0.5, 1.2))
                 
                 result = await self.safe_request(
                     client,
                     client,
                     GetResaleStarGiftsRequest(
-                        gift_id=gift_id,
-                        offset="",
-                        limit=config.FETCH_LIMIT,
-                        sort_by_num=False,
-                        sort_by_price=False
+                        gift_id=gift_id, offset="", limit=config.FETCH_LIMIT,
+                        sort_by_num=False, sort_by_price=False
                     ),
                     critical=True
                 )
@@ -558,267 +540,164 @@ class NFTMonitor:
                 if not result or not hasattr(result, 'gifts'):
                     return []
 
-                listings = []
+                current_listings = []
                 for gift in result.gifts:
                     if hasattr(gift, 'num') and hasattr(gift, 'slug'):
+                        listing_id = f"{gift.slug}-{gift.num}"
                         price = getattr(gift, 'price', None)
                         
-                        listings.append({
+                        listing_data = {
                             'title': gift_name,
                             'slug': gift.slug,
                             'number': gift.num,
                             'price': price,
                             'owner_id': getattr(gift, 'owner_id', None),
-                            'listing_id': f"{gift.slug}-{gift.num}", 
-                        })
+                            'listing_id': listing_id,
+                        }
+                        current_listings.append(listing_data)
+                        
+                        # IMMEDIATE ALERT if new
+                        if listing_id not in self.seen_listings and self.stats['scans'] > 0:
+                            # We check self.stats['scans'] > 0 to avoid flooding on initial scan
+                            asyncio.create_task(self.send_single_alert(listing_data))
+                            self.seen_listings.add(listing_id)
+                            self.listing_timestamps[listing_id] = datetime.now()
                 
-                self.stats['total_listings_found'] += len(listings)
+                self.stats['total_listings_found'] += len(current_listings)
                 self.stats['unique_gifts_seen'].add(gift_name)
                 
-                return listings
+                return current_listings
 
-            except FloodWaitError as e:
-                await asyncio.sleep(e.seconds + random.randint(20, 60))
-                return []
             except Exception as e:
                 self.stats['errors'] += 1
                 logger.debug(f"Ошибка загрузки {gift_name}: {e}")
                 return []
 
-    async def scan_all_gifts(self, client: TelegramClient, gifts: List[dict]) -> List[dict]:
-        if not gifts:
-            return []
+    async def send_single_alert(self, listing: dict) -> None:
+        try:
+            raw_owner_id = listing.get('owner_id')
+            if not raw_owner_id:
+                return
+
+            user_data = await self.check_owner(self.client, raw_owner_id)
+            if not user_data:
+                return
+
+            user_id_num = user_data['id']
+            if user_id_num in self.banned_users:
+                return
+
+            link = f"https://t.me/nft/{listing['slug']}-{listing['number']}"
+            price_text = ""
+            if listing.get('price'):
+                 amount = getattr(listing['price'], 'amount', listing['price'])
+                 price_text = f"\n💰 {amount} ⭐️"
+
+            msg = f"{link}\n\n🎁 **{listing['title']}** `#{listing['number']}`{price_text}\n👤 {user_data['display_name']}"
+            
+            user_link = f"https://t.me/{user_data['username']}" if user_data['username'] else f"tg://user?id={user_id_num}"
+            profile_btn = Button.url("🔗 Профиль", user_link)
+            take_btn = Button.inline("👤 Взять в работу", data=f"take_{user_id_num}".encode())
+            ban_btn = Button.inline("🚫 Заблокировать", data=f"ban_{user_id_num}".encode())
+            
+            await self.safe_request(
+                self.bot_client, self.bot_client.send_message, config.GROUP_ID,
+                msg, link_preview=True, parse_mode='Markdown',
+                buttons=[[profile_btn], [take_btn, ban_btn]], critical=False
+            )
+            self.stats['alerts'] += 1
+            
+            # History and Stats
+            self.listings_history.append({
+                'timestamp': datetime.now().isoformat(),
+                'title': listing['title'], 'slug': listing['slug'], 'number': listing['number'],
+                'price': str(listing.get('price')), 'listing_id': listing['listing_id'],
+                'owner': user_data['display_name'], 'link': link
+            })
+            current_hour = datetime.now().strftime('%Y-%m-%d %H:00')
+            self.stats['hourly_alerts'][current_hour] = self.stats['hourly_alerts'].get(current_hour, 0) + 1
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки алерту: {e}")
+
+    async def scan_all_gifts(self, client: TelegramClient, gifts: List[dict]):
+        if not gifts: return
         
         shuffled = gifts.copy()
         random.shuffle(shuffled)
         
-        total_gifts = len(shuffled)
-        logger.info(f"🔍 Сканируем {total_gifts} подарков")
+        semaphore = asyncio.Semaphore(5) # Increased concurrency
+        batch_size = 3
         
-        semaphore = asyncio.Semaphore(config.CONCURRENT_REQUESTS)
-        all_listings = []
-        
-        batch_size = 1 if self.get_error_rate() > 0.1 else 3
-        
-        for i in range(0, total_gifts, batch_size):
-            if not self.check_circuit_breaker():
-                logger.warning("⏸ Автостоп, пропуск батча")
-                await asyncio.sleep(15)
-                continue
+        for i in range(0, len(shuffled), batch_size):
+            if not self.check_circuit_breaker(): break
             
             batch = shuffled[i:i+batch_size]
-            logger.info(f"⏳ Батч {i//batch_size + 1}/{(total_gifts + batch_size - 1)//batch_size} ({len(batch)} шт: {', '.join(g['title'] for g in batch)})")
-
-            tasks = [self.fetch_fresh_listings(client, g['id'], g['title'], semaphore) for g in batch]
+            tasks = [self.fetch_and_process_listing(client, g['id'], g['title'], semaphore) for g in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            for result in results:
-                if isinstance(result, list):
-                    all_listings.extend(result)
-            
-            if i + batch_size < total_gifts:
-                delay = random.uniform(config.BATCH_DELAY_MIN, config.BATCH_DELAY_MAX)
-                if self.get_error_rate() > 0.15:
-                    delay *= 1.5
-                await asyncio.sleep(delay)
-        
-        return all_listings
+            # Update seen listings from initial scan if needed
+            if self.stats['scans'] == 0:
+                for res in results:
+                    if isinstance(res, list):
+                        for l in res:
+                            self.seen_listings.add(l['listing_id'])
+                            self.listing_timestamps[l['listing_id']] = datetime.now()
 
-    async def send_all_alerts_optimized(
-        self,
-        client: TelegramClient,
-        chat_entity_id,
-        listings: List[dict]
-    ) -> None:
-        if not listings:
-            return
-        
-        logger.info(f"📤 Отправка {len(listings)} алертов")
-        semaphore = asyncio.Semaphore(config.CONCURRENT_ALERTS)
-        seen_authors_in_batch = set()
-        
-        async def send_one(listing):
-            async with semaphore:
-                try:
-                    if not self.check_circuit_breaker() or not await self.ensure_connected(client):
-                        return
-                    
-                    raw_owner_id = listing.get('owner_id')
-                    if not raw_owner_id:
-                        self.stats['skipped_no_owner'] += 1
-                        return
-
-                    # Resolve owner and verify it's an accessible User profile
-                    user_data = await self.check_owner(self.client, raw_owner_id)
-                    if not user_data:
-                        logger.debug(f"👤 Skip lot: inaccessible profile or channel {raw_owner_id}")
-                        return
-
-                    user_id_num = user_data['id']
-                    if user_id_num in self.banned_users:
-                        logger.info(f"🚫 Пропуск лота от забаненного юзера {user_id_num}")
-                        return
-
-                    if user_id_num in seen_authors_in_batch:
-                        return
-                    
-                    seen_authors_in_batch.add(user_id_num)
-                    link = f"https://t.me/nft/{listing['slug']}-{listing['number']}"
-                    
-                    price_text = ""
-                    if listing.get('price'):
-                         amount = getattr(listing['price'], 'amount', listing['price'])
-                         price_text = f"\n💰 {amount} ⭐️"
-
-                    # REORDER: Link first for GIFT preview, then details. NO LEVEL.
-                    msg = f"{link}\n\n🎁 **{listing['title']}** `#{listing['number']}`{price_text}\n👤 {user_data['display_name']}"
-                    
-                    # Buttons
-                    user_link = f"https://t.me/{user_data['username']}" if user_data['username'] else f"tg://user?id={user_id_num}"
-                    profile_btn = Button.url("🔗 Профиль", user_link)
-                    take_btn = Button.inline("👤 Взять в работу", data=f"take_{user_id_num}".encode())
-                    ban_btn = Button.inline("🚫 Заблокировать", data=f"ban_{user_id_num}".encode())
-                    
-                    await asyncio.sleep(random.uniform(1.5, 3.5))
-                    
-                    await self.safe_request(
-                        self.bot_client,
-                        self.bot_client.send_message,
-                        chat_entity_id,
-                        msg,
-                        link_preview=True,
-                        parse_mode='Markdown',
-                        buttons=[[profile_btn], [take_btn, ban_btn]],
-                        critical=False
-                    )
-                    self.stats['alerts'] += 1
-                    
-                    history_entry = {
-                        'timestamp': datetime.now().isoformat(),
-                        'title': listing['title'],
-                        'slug': listing['slug'],
-                        'number': listing['number'],
-                        'price': str(listing.get('price')),
-                        'listing_id': listing['listing_id'],
-                        'owner': user_data['display_name'],
-                        'link': link
-                    }
-                    self.listings_history.append(history_entry)
-                    
-                    current_hour = datetime.now().strftime('%Y-%m-%d %H:00')
-                    self.stats['hourly_alerts'][current_hour] = self.stats['hourly_alerts'].get(current_hour, 0) + 1
-                    
-                except Exception as e:
-                    logger.error(f"❌ Ошибка отправки: {e}")
-        
-        await asyncio.gather(*[send_one(l) for l in listings], return_exceptions=True)
-        logger.info(f"✓ Отправлено: {self.stats['alerts']} | Пропущено: {self.stats['skipped_no_owner']}")
+            await asyncio.sleep(random.uniform(1.0, 2.0))
 
     async def run(self):
         logger.info("=" * 60)
-        logger.info("NFT MONITOR by wortexhf [SECURE MODE]")
+        logger.info("NFT MONITOR by wortexhf [FAST MODE]")
         logger.info("=" * 60)
-        logger.info(f"📁 Данные: {config.DATA_DIR}")
-        logger.info("")
         
         self.load_stats()
         self.load_history()
         self.load_banned_users()
         self.load_taken_users()
         
-        keepalive = None
-        health_monitor = None
-        stats_saver = None
+        keepalive = health_monitor = stats_saver = None
         
         try:
             await self.client.start()
-            
-            if not config.BOT_TOKEN:
-                logger.error("❌ BOT_TOKEN не найден!")
-                return
             await self.bot_client.start(bot_token=config.BOT_TOKEN)
-            logger.info("✓ Бот подключен")
             
             self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=b"ban_"))
             self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=b"take_"))
             
-            await asyncio.sleep(random.uniform(3, 6))
             me = await self.client.get_me()
-            logger.info(f"✓ Юзер подключен: {me.first_name}")
-            self.health_status["connected"] = True
+            logger.info(f"✓ Подключено: {me.first_name}")
             
             keepalive = asyncio.create_task(self.keepalive_task(self.client))
             health_monitor = asyncio.create_task(self.health_monitor_task())
             stats_saver = asyncio.create_task(self.stats_saver_task())
             
             gifts = await self.get_available_gifts(self.client)
-            if not gifts:
-                logger.error("❌ Нет целевых подарков")
-                return
-            
-            await asyncio.sleep(random.uniform(3, 6))
-            
-            try:
-                await self.safe_request(self.client, self.client.get_entity, config.GROUP_ID, critical=True)
-                logger.info(f"✓ Группа подключена")
-            except Exception as e:
-                logger.error(f"❌ Ошибка подключения к группе: {e}")
-
-            await asyncio.sleep(random.uniform(4, 8))
+            if not gifts: return
             
             logger.info("🔍 Начальное сканирование...")
-            initial = await self.scan_all_gifts(self.client, gifts)
-            
-            now = datetime.now()
-            for listing in initial:
-                self.seen_listings.add(listing['listing_id'])
-                self.listing_timestamps[listing['listing_id']] = now
-            
-            logger.info(f"✓ База: {len(self.seen_listings)} листингов")
-            logger.info(f"✓ Мониторинг запущен")
-            logger.info("")
+            await self.scan_all_gifts(self.client, gifts)
+            logger.info(f"✓ База: {len(self.seen_listings)} листингов. Мониторинг запущен.")
             
             while True:
                 try:
                     if not await self.ensure_connected(self.client):
-                        await asyncio.sleep(60)
-                        continue
+                        await asyncio.sleep(30); continue
                     
                     self.stats['scans'] += 1
-                    scan_start = datetime.now()
+                    logger.info(f"СКАН #{self.stats['scans']} (Найдено: {self.stats['alerts']})")
                     
-                    logger.info(f"{'='*60}")
-                    logger.info(f"СКАН #{self.stats['scans']}")
-                    logger.info(f"{'='*60}")
-                    
-                    all_listings = await self.scan_all_gifts(self.client, gifts)
-                    
-                    now = datetime.now()
-                    current_listing_ids = {l['listing_id'] for l in all_listings}
-                    new_listing_ids = current_listing_ids - self.seen_listings
-                    
-                    if new_listing_ids:
-                        new_listings = [l for l in all_listings if l['listing_id'] in new_listing_ids]
-                        logger.info(f"🆕 Новых: {len(new_listings)}")
-                        
-                        for listing_id in new_listing_ids:
-                            self.seen_listings.add(listing_id)
-                            self.listing_timestamps[listing_id] = now
-                        
-                        await self.send_all_alerts_optimized(self.client, config.GROUP_ID, new_listings)
-                    else:
-                        logger.info("⏸ Новых нет")
+                    await self.scan_all_gifts(self.client, gifts)
                     
                     self.cleanup_old()
                     self.update_health()
                     
                     delay = random.randint(*self.get_adaptive_delay())
-                    logger.info(f"⏸ Пауза {delay}с")
                     await asyncio.sleep(delay)
                     
                 except Exception as e:
                     logger.error(f"❌ Ошибка цикла: {e}")
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(30)
         
         except KeyboardInterrupt:
             logger.info("\n⏹ Остановлено")
@@ -831,4 +710,3 @@ class NFTMonitor:
             self.save_taken_users()
             await self.client.disconnect()
             await self.bot_client.disconnect()
-            logger.info("✓ Отключено")
