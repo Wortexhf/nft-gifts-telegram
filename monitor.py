@@ -91,56 +91,65 @@ class NFTMonitor:
         try:
             data = event.data.decode()
             if not data.startswith("ban_"): return
-            user_id = int(data.split("_")[1])
-            self.banned_users.add(user_id)
+            uid = int(data.split("_")[1])
+            self.banned_users.add(uid)
             self.save_banned_users()
+            logger.info(f"🚫 Користувача {uid} забанено")
             await event.answer("🚫 Користувача заблоковано!", alert=True)
             msg = await event.get_message()
             await msg.edit(msg.text + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**", buttons=None, link_preview=True)
-        except: pass
+        except Exception as e: logger.error(f"Ban error: {e}")
 
     async def handle_take_callback(self, event):
         try:
             data = event.data.decode()
-            parts = data.split("_")
-            if len(parts) < 2: return
-            target_user_id = parts[1]
+            if not data.startswith("take_"): return
+            target_uid = data.split("_")[1]
             sender = await event.get_sender()
             clicker_name = f"@{sender.username}" if sender.username else sender.first_name
-            if target_user_id in self.taken_users:
-                await event.answer(f"⚠️ Вже зайнято: {self.taken_users[target_user_id]}", alert=True); return
-            self.taken_users[target_user_id] = clicker_name
+            
+            if target_uid in self.taken_users:
+                await event.answer(f"⚠️ Вже зайнято: {self.taken_users[target_uid]}", alert=True); return
+
+            self.taken_users[target_uid] = clicker_name
             self.save_taken_users()
+            logger.info(f"🔒 Взято в роботу: {target_uid} користувачем {clicker_name}")
             await event.answer(f"✅ Ви взяли цього продавця!")
             
-            uid = int(target_user_id)
-            # Use callback for Profile even in Taken state for reliability
-            btns = [[Button.inline("🔗 Профіль", data=f"prof_{uid}")], [Button.inline("🚫 Заблокировать", data=f"ban_{uid}")]]
+            uid = int(target_uid)
+            user_data = self.owner_cache.get(uid, (None, None))[0]
+            
+            # Form Profile button
+            if user_data and user_data.get('username'):
+                p_btn = Button.url("🔗 Профіль", f"https://t.me/{user_data['username']}")
+            else:
+                p_btn = Button.inline("🔗 Профіль", data=f"prof_{uid}".encode())
+            
             msg = await event.get_message()
+            btns = [[p_btn], [Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]]
             await msg.edit(msg.text + f"\n\n🔒 **Взяв:** {clicker_name}", buttons=btns, link_preview=True)
-        except: pass
+        except Exception as e: logger.error(f"Take error: {e}")
 
     async def handle_prof_callback(self, event):
-        """Replicates zrazok logic: sends clickable profile link to PM"""
         try:
             data = event.data.decode()
             if not data.startswith("prof_"): return
             uid = int(data.split("_")[1])
+            logger.info(f"🔗 Запит профілю для {uid}")
             
-            # Form link
             u_link = f"tg://user?id={uid}"
             if uid in self.owner_cache:
                 ud = self.owner_cache[uid][0]
-                if ud and ud.get('username'):
-                    u_link = f"https://t.me/{ud['username']}"
+                if ud and ud.get('username'): u_link = f"https://t.me/{ud['username']}"
             
-            await event.answer("✅ Посилання надіслано в особисті повідомлення!", alert=False)
-            
+            await event.answer("✅ Посилання надіслано в особисті!", alert=False)
             try:
-                await self.bot_client.send_message(event.sender_id, f"👤 **Продавець:**\n{u_link}\n\n_Якщо посилання не відкривається, спробуйте знайти його через сам подарунок._", parse_mode='Markdown')
-            except:
+                sender = await event.get_sender()
+                await self.bot_client.send_message(sender, f"👤 **Продавець:**\n{u_link}\n\n_Ви отримали це повідомлення, бо у продавця немає публічного імені (username)._", parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Failed to send PM: {e}")
                 await event.answer("❌ Бот не може написати вам! Спочатку натисніть 'Start' у самому боті.", alert=True)
-        except: pass
+        except Exception as e: logger.error(f"Prof error: {e}")
 
     def load_stats(self):
         try:
@@ -188,9 +197,7 @@ class NFTMonitor:
             if not isinstance(entity, types.User) or entity.bot:
                 self.owner_cache[uid] = (None, datetime.now()); return None
             
-            # Accessibility check (Logic from zrazok)
             await self.client(GetFullUserRequest(entity))
-            
             name = ((entity.first_name or "") + " " + (entity.last_name or "")).strip() or "Unknown"
             data = {'id': uid, 'name': name.replace('[', '').replace(']', ''), 'username': entity.username}
             self.owner_cache[uid] = (data, datetime.now())
@@ -218,7 +225,6 @@ class NFTMonitor:
     async def immediate_alert(self, gift, gift_name):
         sent_msg = None
         try:
-            # 1. STRICT Peer Check (Skip channels immediately)
             if not (hasattr(gift, 'owner_id') and isinstance(gift.owner_id, types.PeerUser)):
                 return 
 
@@ -226,22 +232,27 @@ class NFTMonitor:
             link = f"https://t.me/nft/{gift.slug}-{gift.num}"
             price = f"\n💰 {getattr(gift.price, 'amount', gift.price)} ⭐️" if hasattr(gift, 'price') and gift.price else ""
             
-            # 2. Fast Send (Link first for preview)
+            # 1. Fast Send
             msg_text = f"{link}\n\n🎁 **{gift_name}** `#{gift.num}`{price}\n👤 Пошук продавця..."
             sent_msg = await self.bot_client.send_message(config.GROUP_ID, msg_text, link_preview=True)
             if not sent_msg: return
 
-            # 3. Resolve Profile
+            # 2. Resolve Profile
             user_data = await self.check_owner(uid)
             
-            # 4. Filter & Delete if inaccessible
+            # 3. STRICT FILTER
             if not user_data or uid in self.banned_users:
                 await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id])
                 return
 
-            # 5. RICH UPDATE (Profile button as CALLBACK for reliability)
+            # 4. Profile Button Logic
+            if user_data.get('username'):
+                p_btn = Button.url("🔗 Профіль", f"https://t.me/{user_data['username']}")
+            else:
+                p_btn = Button.inline("🔗 Профіль", data=f"prof_{uid}".encode())
+
             final_text = f"{link}\n\n🎁 **{gift_name}** `#{gift.num}`{price}\n👤 {user_data['name']}"
-            btns = [[Button.inline("🔗 Профіль", data=f"prof_{uid}")], [Button.inline("👤 Взять в роботу", data=f"take_{uid}"), Button.inline("🚫 Заблокировать", data=f"ban_{uid}")]]
+            btns = [[p_btn], [Button.inline("👤 Взять в работу", data=f"take_{uid}".encode()), Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]]
             
             await sent_msg.edit(final_text, buttons=btns, link_preview=True)
             self.stats['alerts'] += 1
@@ -265,7 +276,7 @@ class NFTMonitor:
         try:
             await self.client.start(); await self.bot_client.start(bot_token=config.BOT_TOKEN)
             
-            # Handlers
+            # Re-register with explicit patterns
             self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=b"ban_"))
             self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=b"take_"))
             self.bot_client.add_event_handler(self.handle_prof_callback, events.CallbackQuery(pattern=b"prof_"))
@@ -276,7 +287,7 @@ class NFTMonitor:
             while True:
                 self.stats['scans'] += 1; self.current_scan_found = 0
                 await self.scan_all(gifts)
-                if self.current_scan_found > 0: logger.info(f"🆕 Нових: {self.current_scan_found}")
+                if self.current_scan_found > 0: logger.info(f"🆕 Знайдено нових: {self.current_scan_found}")
                 self.save_stats(); self.save_taken_users()
                 await asyncio.sleep(random.randint(3, 7))
         except Exception as e: logger.error(f"Критична помилка: {e}")
