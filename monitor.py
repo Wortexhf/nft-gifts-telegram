@@ -731,6 +731,25 @@ class NFTMonitor:
             logger.info(f"✓ Группа подключена")
             await asyncio.sleep(random.uniform(4, 8))
             
+            # --- TEST BUTTONS START ---
+            try:
+                test_buttons = [
+                    Button.inline("👤 Взять в работу (Тест)", data=b"take_0"),
+                    Button.inline("🚫 Заблокировать (Тест)", data=b"ban_0")
+                ]
+                await self.safe_request(
+                    self.client,
+                    self.client.send_message,
+                    chat_entity,
+                    "🔔 **Тест кнопок бота**\nПеревірка відображення клавіатури.",
+                    buttons=test_buttons,
+                    critical=False
+                )
+                logger.info("✓ Тестове повідомлення з кнопками надіслано")
+            except Exception as e:
+                logger.error(f"❌ Не вдалося надіслати тест кнопок: {e}")
+            # --- TEST BUTTONS END ---
+            
             logger.info("🔍 Начальное сканирование...")
             initial = await self.scan_all_gifts(self.client, gifts)
             
