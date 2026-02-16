@@ -3,6 +3,7 @@ import random
 import traceback
 import sys
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Set
 from collections import deque
@@ -27,7 +28,7 @@ class NFTMonitor:
     def __init__(self):
         self.seen_listings: Set[str] = set()
         self.listing_timestamps: Dict[str, datetime] = {}
-        self.owner_cache: Dict[int, Tuple[Optional[str], datetime]] = {}
+        self.owner_cache: Dict[int, Tuple[Optional[dict], datetime]] = {}
         self.banned_users: Set[int] = set()
         self.taken_users: Dict[str, str] = {} # user_id -> taken_by_username
         self.last_request_times = deque(maxlen=50)
@@ -144,15 +145,13 @@ class NFTMonitor:
             
             await event.answer(f"✅ Вы взяли этого продавца!", alert=False)
             
-            # Better link logic: use username if available in cache
+            # Better profile link logic using dictionary cache
             user_id_int = int(target_user_id)
             user_link = f"tg://user?id={user_id_int}"
             if user_id_int in self.owner_cache:
-                cached_val = self.owner_cache[user_id_int][0]
-                import re
-                match = re.search(r't\.me/(\w+)', cached_val)
-                if match:
-                    user_link = f"https://t.me/{match.group(1)}"
+                user_data = self.owner_cache[user_id_int][0]
+                if user_data and user_data.get('username'):
+                    user_link = f"https://t.me/{user_data['username']}"
 
             try:
                 msg = await event.get_message()
@@ -464,74 +463,50 @@ class NFTMonitor:
             logger.error(f"❌ Ошибка получения подарков: {e}")
             return []
 
-    async def check_owner(self, client: TelegramClient, owner_id) -> Optional[str]:
+    async def check_owner(self, client: TelegramClient, owner_id) -> Optional[dict]:
         if not owner_id:
             return None
         
         try:
-            # Extract integer ID and handle type
+            # Extract user ID and ensure it's likely a user
             if hasattr(owner_id, 'user_id'):
                 user_id = owner_id.user_id
-            elif hasattr(owner_id, 'channel_id'):
-                # Star Gifts can be owned by channels, but usually we want users
-                # We'll handle it but logger will show it's a channel
-                user_id = owner_id.channel_id
             elif isinstance(owner_id, int):
                 user_id = owner_id
             else:
+                # Skip channels or other peer types as per user request
                 return None
             
             if user_id in self.owner_cache:
-                username, cached_time = self.owner_cache[user_id]
+                cached_data, cached_time = self.owner_cache[user_id]
                 cache_age = (datetime.now() - cached_time).total_seconds() / 3600
                 if cache_age < config.OWNER_CACHE_TTL_HOURS:
-                    return username
+                    return cached_data
             
             if not await self.ensure_connected(client):
                 return None
             
             await asyncio.sleep(random.uniform(0.3, 0.8))
             
-            # Use get_entity to get the user/channel
             entity = await self.safe_request(client, client.get_entity, owner_id, max_retries=2, critical=False)
-            if not entity:
+            # Ensure it's a user entity (has first_name) and not a channel/bot
+            if not entity or not hasattr(entity, 'first_name') or getattr(entity, 'broadcast', False):
                 self.owner_cache[user_id] = (None, datetime.now())
                 return None
             
-            # Fetch full info to get level (like in scrape_telegram_nft.py)
-            from telethon.tl.functions.users import GetFullUserRequest
-            from telethon.tl.functions.channels import GetFullChannelRequest
-            
-            profile_level = None
-            try:
-                if hasattr(entity, 'bot') and entity.bot:
-                    pass # Bots don't have levels usually
-                elif hasattr(entity, 'username'): # It's a user or channel
-                    if hasattr(entity, 'mutual_contact'): # likely a user
-                        full = await self.safe_request(client, client, GetFullUserRequest(entity), max_retries=1)
-                        if full and hasattr(full, 'full_user') and hasattr(full.full_user, 'stars_rating'):
-                             if hasattr(full.full_user.stars_rating, 'level'):
-                                 profile_level = full.full_user.stars_rating.level
-                    elif hasattr(entity, 'broadcast'): # likely a channel
-                        pass
-            except:
-                pass
-
-            username_str = None
-            display_name = getattr(entity, 'first_name', getattr(entity, 'title', 'Unknown')) or 'Unknown'
+            display_name = entity.first_name or "Unknown"
+            if getattr(entity, 'last_name', None):
+                display_name += f" {entity.last_name}"
             display_name = display_name.replace('[', '').replace(']', '')
             
-            level_tag = f" [Lvl {profile_level}]" if profile_level is not None else ""
+            user_data = {
+                'id': user_id,
+                'display_name': display_name,
+                'username': getattr(entity, 'username', None)
+            }
             
-            if hasattr(entity, 'username') and entity.username:
-                username_str = f"[{display_name}{level_tag}](https://t.me/{entity.username})"
-            else:
-                # Use deep link for users without username
-                prefix = "user" if hasattr(entity, 'mutual_contact') or not hasattr(entity, 'broadcast') else "c"
-                username_str = f"[{display_name}{level_tag}](tg://{prefix}?id={user_id})"
-            
-            self.owner_cache[user_id] = (username_str, datetime.now())
-            return username_str
+            self.owner_cache[user_id] = (user_data, datetime.now())
+            return user_data
             
         except Exception as e:
             logger.debug(f"Error in check_owner: {e}")
@@ -663,28 +638,19 @@ class NFTMonitor:
                         self.stats['skipped_no_owner'] += 1
                         return
 
-                    # Extract integer ID properly
-                    if hasattr(raw_owner_id, 'user_id'):
-                        user_id_num = raw_owner_id.user_id
-                    elif hasattr(raw_owner_id, 'channel_id'):
-                        user_id_num = raw_owner_id.channel_id
-                    elif isinstance(raw_owner_id, int):
-                        user_id_num = raw_owner_id
-                    else:
-                        logger.debug(f"👤 Skip unknown owner type: {raw_owner_id}")
+                    # Filter: Only those where we can enter profile (users)
+                    user_data = await self.check_owner(self.client, raw_owner_id)
+                    if not user_data:
+                        logger.debug(f"👤 Skip lot: inaccessible profile or channel {raw_owner_id}")
                         return
-                    
+
+                    user_id_num = user_data['id']
                     if user_id_num in self.banned_users:
                         logger.info(f"🚫 Пропуск лота от забаненного юзера {user_id_num}")
                         return
 
                     if user_id_num in seen_authors_in_batch:
                         return
-                    
-                    owner = await self.check_owner(self.client, raw_owner_id)
-                    
-                    if not owner or owner == "Unknown/Hidden":
-                        owner = f"[User {user_id_num}](tg://user?id={user_id_num})"
                     
                     seen_authors_in_batch.add(user_id_num)
                     link = f"https://t.me/nft/{listing['slug']}-{listing['number']}"
@@ -694,8 +660,12 @@ class NFTMonitor:
                          amount = getattr(listing['price'], 'amount', listing['price'])
                          price_text = f"\n💰 {amount} ⭐️"
 
-                    msg = f"**{listing['title']}** `#{listing['number']}`{price_text}\n👤 {owner}\n{link}"
+                    # Reorder: Gift link first for preview, then info
+                    msg = f"{link}\n\n**{listing['title']}** `#{listing['number']}`{price_text}\n👤 {user_data['display_name']}"
                     
+                    # Buttons
+                    user_link = f"https://t.me/{user_data['username']}" if user_data['username'] else f"tg://user?id={user_id_num}"
+                    profile_btn = Button.url("🔗 Профиль", user_link)
                     take_btn = Button.inline("👤 Взять в работу", data=f"take_{user_id_num}".encode())
                     ban_btn = Button.inline("🚫 Заблокировать", data=f"ban_{user_id_num}".encode())
                     
@@ -708,7 +678,7 @@ class NFTMonitor:
                         msg,
                         link_preview=True,
                         parse_mode='Markdown',
-                        buttons=[take_btn, ban_btn],
+                        buttons=[[profile_btn], [take_btn, ban_btn]],
                         critical=False
                     )
                     self.stats['alerts'] += 1
@@ -720,7 +690,7 @@ class NFTMonitor:
                         'number': listing['number'],
                         'price': str(listing.get('price')),
                         'listing_id': listing['listing_id'],
-                        'owner': owner,
+                        'owner': user_data['display_name'],
                         'link': link
                     }
                     self.listings_history.append(history_entry)
