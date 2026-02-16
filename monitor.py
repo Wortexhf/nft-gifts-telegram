@@ -30,13 +30,16 @@ class NFTMonitor:
         self.listing_timestamps: Dict[str, datetime] = {}
         self.owner_cache: Dict[int, Tuple[Optional[dict], datetime]] = {}
         self.banned_users: Set[int] = set()
-        self.taken_users: Dict[str, str] = {} # user_id -> taken_by_username
+        self.taken_users: Dict[str, str] = {} 
         self.last_request_times = deque(maxlen=50)
         self.error_history = deque(maxlen=100)
         self.circuit_breaker_until: Optional[datetime] = None
         self.consecutive_errors = 0
         self.health_status = {"connected": True, "last_success": datetime.now(), "error_rate": 0.0}
         self.start_time = datetime.now()
+        
+        self.alert_queue = asyncio.Queue()
+        self.is_bootstrapping = True # Flag to skip alerts on first run
         
         self.stats = {
             'scans': 0, 'alerts': 0, 'errors': 0, 'skipped_no_owner': 0,
@@ -49,7 +52,6 @@ class NFTMonitor:
         }
         self.listings_history = []
         
-        # User Client (for scanning Star Gifts)
         self.client = TelegramClient(
             config.SESSION_NAME,
             config.API_ID,
@@ -57,12 +59,9 @@ class NFTMonitor:
             connection_retries=5,
             retry_delay=8,
             auto_reconnect=True,
-            timeout=60,
-            request_retries=3,
-            flood_sleep_threshold=180
+            timeout=60
         )
         
-        # Bot Client (for sending alerts with buttons)
         self.bot_client = TelegramClient(
             str(BOT_SESSION_PATH),
             config.API_ID,
@@ -104,50 +103,37 @@ class NFTMonitor:
     async def handle_ban_callback(self, event):
         try:
             data = event.data.decode()
-            if not data.startswith("ban_"):
-                return
-            
+            if not data.startswith("ban_"): return
             user_id = int(data.split("_")[1])
             self.banned_users.add(user_id)
             self.save_banned_users()
-            
             await event.answer("🚫 Пользователь заблокирован!", alert=True)
-            
             try:
                 msg = await event.get_message()
                 new_text = msg.text + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**"
                 await msg.edit(new_text, buttons=None, link_preview=True)
-            except Exception as e:
-                logger.error(f"Ошибка редактирования сообщения при бане: {e}")
-                
-        except Exception as e:
-            logger.error(f"Ошибка в handle_ban_callback: {e}")
+            except: pass
+        except Exception as e: logger.error(f"Ошибка в handle_ban_callback: {e}")
 
     async def handle_take_callback(self, event):
         try:
             data = event.data.decode()
             parts = data.split("_")
-            if len(parts) < 2: 
-                return
-            
+            if len(parts) < 2: return
             target_user_id = parts[1]
-            
             sender = await event.get_sender()
             clicker_name = f"@{sender.username}" if sender.username else sender.first_name
             
             if target_user_id in self.taken_users:
-                taken_by = self.taken_users[target_user_id]
-                await event.answer(f"⚠️ Уже занято: {taken_by}", alert=True)
+                await event.answer(f"⚠️ Уже занято: {self.taken_users[target_user_id]}", alert=True)
                 return
 
             self.taken_users[target_user_id] = clicker_name
             self.save_taken_users()
-            
-            await event.answer(f"✅ Вы взяли этого продавца!", alert=False)
+            await event.answer(f"✅ Ви взяли цього продавця!", alert=False)
             
             user_id_int = int(target_user_id)
             user_link = f"tg://user?id={user_id_int}"
-            
             if user_id_int in self.owner_cache:
                 user_data = self.owner_cache[user_id_int][0]
                 if user_data and user_data.get('username'):
@@ -156,16 +142,11 @@ class NFTMonitor:
             try:
                 msg = await event.get_message()
                 new_text = msg.text + f"\n\n🔒 **Взял:** {clicker_name}"
-                
                 profile_btn = Button.url("🔗 Профиль", user_link)
                 ban_btn = Button.inline("🚫 Заблокировать", data=f"ban_{target_user_id}".encode())
-                
                 await msg.edit(new_text, buttons=[[profile_btn], [ban_btn]], link_preview=True)
-            except Exception as e:
-                logger.error(f"Ошибка редактирования сообщения при взятии: {e}")
-
-        except Exception as e:
-            logger.error(f"Ошибка в handle_take_callback: {e}")
+            except: pass
+        except Exception as e: logger.error(f"Ошибка в handle_take_callback: {e}")
 
     def load_stats(self):
         try:
@@ -173,16 +154,14 @@ class NFTMonitor:
                 with open(config.STATS_FILE, 'r', encoding='utf-8') as f:
                     loaded = json.load(f)
                     for key in ['scans', 'alerts', 'errors', 'skipped_no_owner', 'reconnects', 'flood_waits', 'circuit_breaks', 'successful_requests', 'failed_requests', 'total_listings_found']:
-                        if key in loaded:
-                            self.stats[key] = loaded[key]
+                        if key in loaded: self.stats[key] = loaded[key]
                     self.stats['unique_gifts_seen'] = set(loaded.get('unique_gifts_seen', []))
                     self.stats['hourly_alerts'] = loaded.get('hourly_alerts', {})
                     if 'start_time' in loaded:
                         self.start_time = datetime.fromisoformat(loaded['start_time'])
                         self.stats['start_time'] = loaded['start_time']
                     logger.info("✓ Статистика загружена")
-        except Exception as e:
-            logger.warning(f"Не удалось загрузить статистику: {e}")
+        except Exception as e: logger.warning(f"Не удалось загрузить статистику: {e}")
 
     def save_stats(self):
         try:
@@ -193,13 +172,9 @@ class NFTMonitor:
             stats_copy['error_rate'] = self.get_error_rate()
             stats_copy['seen_listings_count'] = len(self.seen_listings)
             stats_copy['owner_cache_size'] = len(self.owner_cache)
-            
             with open(config.STATS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(stats_copy, f, ensure_ascii=False, indent=2)
-            
-            logger.debug("✓ Статистика сохранена")
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения статистики: {e}")
+        except Exception as e: logger.error(f"❌ Ошибка сохранения статистики: {e}")
 
     def load_history(self):
         try:
@@ -207,12 +182,10 @@ class NFTMonitor:
                 with open(config.HISTORY_FILE, 'r', encoding='utf-8') as f:
                     self.listings_history = json.load(f)
                 logger.info(f"✓ История загружена: {len(self.listings_history)} записей")
-        except Exception as e:
-            logger.warning(f"Не удалось загрузить историю: {e}")
+        except Exception as e: logger.warning(f"Не удалось загрузить историю: {e}")
 
     def get_error_rate(self) -> float:
-        if not self.error_history:
-            return 0.0
+        if not self.error_history: return 0.0
         recent_window = datetime.now() - timedelta(minutes=15)
         recent_errors = sum(1 for ts, is_error in self.error_history if ts > recent_window and is_error)
         total_recent = sum(1 for ts, _ in self.error_history if ts > recent_window)
@@ -220,355 +193,149 @@ class NFTMonitor:
 
     def update_health(self):
         self.health_status["error_rate"] = self.get_error_rate()
-        if self.stats['successful_requests'] > 0:
-            self.health_status["last_success"] = datetime.now()
+        if self.stats['successful_requests'] > 0: self.health_status["last_success"] = datetime.now()
 
     def get_adaptive_delay(self) -> Tuple[int, int]:
         error_rate = self.get_error_rate()
         base_min, base_max = config.BASE_SCAN_INTERVAL
-        
-        if error_rate > 0.3:
-            multiplier = 2.5
-        elif error_rate > 0.15:
-            multiplier = 1.8
-        elif error_rate > 0.05:
-            multiplier = 1.3
-        else:
-            multiplier = 1.0
-        
-        return (int(base_min * multiplier), int(base_max * multiplier))
+        mult = 2.5 if error_rate > 0.3 else 1.8 if error_rate > 0.15 else 1.0
+        return (int(base_min * mult), int(base_max * mult))
 
     def cleanup_old(self):
         cutoff = datetime.now() - timedelta(hours=config.LISTING_MEMORY_HOURS)
-        cache_cutoff = datetime.now() - timedelta(hours=config.OWNER_CACHE_TTL_HOURS)
-        
-        old_listings = {k for k, v in self.listing_timestamps.items() if v <= cutoff}
-        self.seen_listings -= old_listings
+        self.seen_listings = {k for k in self.seen_listings if self.listing_timestamps.get(k, datetime.now()) > cutoff}
         self.listing_timestamps = {k: v for k, v in self.listing_timestamps.items() if v > cutoff}
-        
+        cache_cutoff = datetime.now() - timedelta(hours=config.OWNER_CACHE_TTL_HOURS)
         self.owner_cache = {k: v for k, v in self.owner_cache.items() if v[1] > cache_cutoff}
-        
-        if len(self.owner_cache) > config.OWNER_CACHE_MAX_SIZE:
-            sorted_cache = sorted(self.owner_cache.items(), key=lambda x: x[1][1], reverse=True)
-            self.owner_cache = dict(sorted_cache[:int(config.OWNER_CACHE_MAX_SIZE * 0.8)])
 
     def check_circuit_breaker(self) -> bool:
-        if self.circuit_breaker_until and datetime.now() < self.circuit_breaker_until:
-            return False
-        
-        if self.circuit_breaker_until and datetime.now() >= self.circuit_breaker_until:
+        if self.circuit_breaker_until and datetime.now() < self.circuit_breaker_until: return False
+        if self.circuit_breaker_until:
             logger.info("✓ Автостоп сброшен")
             self.circuit_breaker_until = None
             self.consecutive_errors = 0
-        
         return True
 
     def trigger_circuit_breaker(self):
         self.consecutive_errors += 1
-        
         if self.consecutive_errors >= config.CIRCUIT_BREAKER_THRESHOLD:
             self.circuit_breaker_until = datetime.now() + timedelta(seconds=config.CIRCUIT_BREAKER_TIMEOUT)
             self.stats['circuit_breaks'] += 1
             logger.warning(f"⚠ Автостоп! Пауза {config.CIRCUIT_BREAKER_TIMEOUT}с")
             self.consecutive_errors = 0
 
-    def reset_circuit_breaker(self):
-        self.consecutive_errors = 0
-
     async def adaptive_rate_limit(self):
         now = datetime.now()
         self.last_request_times.append(now)
-        
         if len(self.last_request_times) >= 2:
             time_since_last = (now - self.last_request_times[-2]).total_seconds()
             min_delay = config.MIN_REQUEST_DELAY + (self.get_error_rate() * 4)
-            
             if time_since_last < min_delay:
-                jitter = random.uniform(0.5, 1.5)
-                await asyncio.sleep(min_delay - time_since_last + jitter)
+                await asyncio.sleep(min_delay - time_since_last + random.uniform(0.1, 0.3))
 
     async def safe_request(self, client: TelegramClient, request_func, *args, max_retries=config.MAX_RETRIES, critical=False, **kwargs):
         if not self.check_circuit_breaker():
-            wait_time = (self.circuit_breaker_until - datetime.now()).total_seconds()
-            if wait_time > 0:
-                await asyncio.sleep(min(wait_time + 1, 15))
+            wait = (self.circuit_breaker_until - datetime.now()).total_seconds()
+            if wait > 0: await asyncio.sleep(min(wait + 1, 15))
         
         for attempt in range(max_retries):
             try:
                 await self.adaptive_rate_limit()
                 result = await asyncio.wait_for(request_func(*args, **kwargs), timeout=config.REQUEST_TIMEOUT)
-                
                 self.stats['successful_requests'] += 1
                 self.error_history.append((datetime.now(), False))
-                self.reset_circuit_breaker()
-                self.update_health()
+                self.consecutive_errors = 0
                 return result
-                
             except FloodWaitError as e:
                 self.stats['flood_waits'] += 1
-                self.stats['failed_requests'] += 1
-                self.error_history.append((datetime.now(), True))
-                
-                wait_time = min(e.seconds + random.randint(20, 60), 1200)
+                wait_time = min(e.seconds + 30, 600)
                 logger.warning(f"⏱ FloodWait {wait_time}с")
-                
                 self.trigger_circuit_breaker()
                 await asyncio.sleep(wait_time)
-                
             except (TimedOutError, asyncio.TimeoutError):
-                self.stats['failed_requests'] += 1
-                self.error_history.append((datetime.now(), True))
                 logger.warning(f"⏱ Таймаут (попытка {attempt+1}/{max_retries})")
-                
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(random.uniform(8, 20))
-                    continue
-                
-                if critical:
-                    self.trigger_circuit_breaker()
-                raise
-                
-            except (NetworkMigrateError, PhoneMigrateError) as e:
-                logger.warning(f"🔄 Миграция: {e}")
-                await client.disconnect()
+                if attempt == max_retries - 1 and critical: self.trigger_circuit_breaker()
                 await asyncio.sleep(random.uniform(5, 10))
-                await client.connect()
-                await asyncio.sleep(3)
-                continue
-                
-            except AuthKeyError as e:
-                logger.error(f"❌ Ошибка авторизации: {e}")
-                self.stats['errors'] += 1
-                raise
-                
-            except (BadRequestError, RPCError) as e:
-                self.stats['failed_requests'] += 1
-                self.error_history.append((datetime.now(), True))
-                error_str = str(e).upper()
-                
-                if "FLOOD" in error_str or "SLOWMODE" in error_str or "WAIT" in error_str:
-                    wait_time = random.randint(180, 420)
-                    logger.warning(f"⏱ Flood/Slowmode {wait_time}с")
-                    self.trigger_circuit_breaker()
-                    await asyncio.sleep(wait_time)
-                    continue
-                
-                logger.error(f"❌ RPC ошибка: {e}")
-                
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(random.uniform(12, 25))
-                    continue
-                
-                if critical:
-                    self.trigger_circuit_breaker()
-                raise
-                
             except Exception as e:
-                self.stats['failed_requests'] += 1
-                self.error_history.append((datetime.now(), True))
-                logger.error(f"❌ Неожиданная ошибка: {type(e).__name__}: {e}")
-                
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(random.uniform(8, 20))
-                    continue
-                
-                if critical:
-                    self.trigger_circuit_breaker()
-                raise
-        
+                logger.error(f"❌ Ошибка RPC: {type(e).__name__}")
+                if attempt == max_retries - 1 and critical: self.trigger_circuit_breaker()
+                await asyncio.sleep(random.uniform(5, 10))
         return None
 
     async def ensure_connected(self, client: TelegramClient) -> bool:
-        try:
-            if not client.is_connected():
-                logger.warning("🔌 Переподключение...")
-                self.stats['reconnects'] += 1
+        if not client.is_connected():
+            try:
                 await client.connect()
-                await asyncio.sleep(random.uniform(3, 6))
                 await client.get_me()
-                logger.info("✓ Переподключено")
                 return True
-            return True
-        except Exception as e:
-            logger.error(f"❌ Переподключение не удалось: {e}")
-            self.health_status["connected"] = False
-            return False
+            except: return False
+        return True
 
-    async def stats_saver_task(self):
+    async def alert_worker(self):
+        """Dedicated worker to process alerts one-by-one to avoid flooding and timeouts"""
         while True:
+            listing = await self.alert_queue.get()
             try:
-                await asyncio.sleep(config.SAVE_STATS_INTERVAL)
-                self.save_stats()
-                self.save_taken_users()
+                await self.send_single_alert(listing)
+                # Small delay between user-resolving and sending alerts
+                await asyncio.sleep(random.uniform(1.5, 3.0))
             except Exception as e:
-                logger.error(f"❌ Ошибка сохранения статистики: {e}")
-
-    async def keepalive_task(self, client: TelegramClient):
-        while True:
-            try:
-                jitter = random.randint(-30, 30)
-                await asyncio.sleep(config.KEEPALIVE_INTERVAL + jitter)
-                
-                if not self.check_circuit_breaker():
-                    continue
-                
-                connected = await self.ensure_connected(client)
-                if connected:
-                    await self.safe_request(client, client, GetStateRequest(), max_retries=2, critical=False)
-                    self.health_status["connected"] = True
-                    logger.debug("✓ Keepalive OK")
-                
-            except Exception as e:
-                logger.error(f"❌ Ошибка keepalive: {e}")
-                self.health_status["connected"] = False
-                await asyncio.sleep(60)
-
-    async def health_monitor_task(self):
-        while True:
-            try:
-                await asyncio.sleep(config.HEALTH_CHECK_INTERVAL)
-                
-                error_rate = self.get_error_rate()
-                time_since_success = (datetime.now() - self.health_status["last_success"]).total_seconds()
-                
-                if error_rate > 0.5:
-                    logger.warning(f"⚠ Высокий процент ошибок: {error_rate:.1%}")
-                
-                if time_since_success > 600:
-                    logger.warning(f"⚠ Нет успешных запросов {time_since_success:.0f}с")
-                
-            except Exception as e:
-                logger.error(f"Ошибка мониторинга: {e}")
-
-    async def get_available_gifts(self, client: TelegramClient) -> List[dict]:
-        try:
-            if not await self.ensure_connected(client):
-                return []
-            
-            result = await self.safe_request(client, client, GetStarGiftsRequest(hash=0), critical=True)
-            if not result or not hasattr(result, 'gifts'):
-                return []
-
-            gifts = [
-                {'id': gift.id, 'title': gift.title}
-                for gift in result.gifts
-                if hasattr(gift, 'title') and gift.title in config.TARGET_GIFT_NAMES
-            ]
-
-            logger.info(f"✓ Найдено {len(gifts)} целевых подарков")
-            return gifts
-
-        except Exception as e:
-            self.stats['errors'] += 1
-            logger.error(f"❌ Ошибка получения подарков: {e}")
-            return []
+                logger.error(f"Worker error: {e}")
+            finally:
+                self.alert_queue.task_done()
 
     async def check_owner(self, client: TelegramClient, owner_id) -> Optional[dict]:
-        if not owner_id:
+        if not owner_id: return None
+        uid = owner_id.user_id if hasattr(owner_id, 'user_id') else owner_id if isinstance(owner_id, int) else None
+        if not uid: return None
+        
+        if uid in self.owner_cache:
+            data, ts = self.owner_cache[uid]
+            if datetime.now() - ts < timedelta(hours=config.OWNER_CACHE_TTL_HOURS): return data
+        
+        if not await self.ensure_connected(client): return None
+        entity = await self.safe_request(client, client.get_entity, owner_id, max_retries=2)
+        
+        if not entity or not isinstance(entity, types.User) or entity.bot:
+            self.owner_cache[uid] = (None, datetime.now())
             return None
         
-        try:
-            if hasattr(owner_id, 'user_id'):
-                user_id = owner_id.user_id
-            elif isinstance(owner_id, int):
-                user_id = owner_id
-            else:
-                return None
-            
-            if user_id in self.owner_cache:
-                cached_data, cached_time = self.owner_cache[user_id]
-                cache_age = (datetime.now() - cached_time).total_seconds() / 3600
-                if cache_age < config.OWNER_CACHE_TTL_HOURS:
-                    return cached_data
-            
-            if not await self.ensure_connected(client):
-                return None
-            
-            await asyncio.sleep(random.uniform(0.3, 0.7))
-            
-            entity = await self.safe_request(client, client.get_entity, owner_id, max_retries=2, critical=False)
-            
-            # STRICT FILTER: Only resolve real users, skip channels/broadcasts/bots
-            if not entity or not isinstance(entity, types.User) or entity.bot:
-                logger.debug(f"👤 Skip lot owner {user_id}: not a user profile")
-                self.owner_cache[user_id] = (None, datetime.now())
-                return None
-            
-            display_name = entity.first_name or "Unknown"
-            if entity.last_name:
-                display_name += f" {entity.last_name}"
-            display_name = display_name.replace('[', '').replace(']', '')
-            
-            user_data = {
-                'id': user_id,
-                'display_name': display_name,
-                'username': entity.username
-            }
-            
-            self.owner_cache[user_id] = (user_data, datetime.now())
-            return user_data
-            
-        except Exception as e:
-            logger.debug(f"Error in check_owner: {e}")
-            return None
+        name = (entity.first_name or "Unknown") + (f" {entity.last_name}" if entity.last_name else "")
+        user_data = {'id': uid, 'display_name': name.replace('[', '').replace(']', ''), 'username': entity.username}
+        self.owner_cache[uid] = (user_data, datetime.now())
+        return user_data
 
-    async def fetch_and_process_listing(
-        self,
-        client: TelegramClient,
-        gift_id: int,
-        gift_name: str,
-        semaphore: asyncio.Semaphore
-    ) -> List[dict]:
+    async def fetch_and_process_listing(self, client: TelegramClient, gift_id: int, gift_name: str, semaphore: asyncio.Semaphore):
         async with semaphore:
             try:
-                if not self.check_circuit_breaker() or not await self.ensure_connected(client):
-                    return []
+                if not self.check_circuit_breaker() or not await self.ensure_connected(client): return []
+                await asyncio.sleep(random.uniform(0.5, 1.5))
                 
-                await asyncio.sleep(random.uniform(1.0, 2.5)) # Increased delay for stability
-                
-                result = await self.safe_request(
-                    client,
-                    client,
-                    GetResaleStarGiftsRequest(
-                        gift_id=gift_id, offset="", limit=config.FETCH_LIMIT,
-                        sort_by_num=False, sort_by_price=False
-                    ),
-                    critical=True
-                )
+                result = await self.safe_request(client, client, GetResaleStarGiftsRequest(
+                    gift_id=gift_id, offset="", limit=config.FETCH_LIMIT, sort_by_num=False, sort_by_price=False
+                ), critical=True)
 
-                if not result or not hasattr(result, 'gifts'):
-                    return []
+                if not result or not hasattr(result, 'gifts'): return []
 
-                current_listings = []
                 for gift in result.gifts:
-                    if hasattr(gift, 'num') and hasattr(gift, 'slug'):
-                        listing_id = f"{gift.slug}-{gift.num}"
-                        price = getattr(gift, 'price', None)
-                        
+                    if not (hasattr(gift, 'num') and hasattr(gift, 'slug')): continue
+                    listing_id = f"{gift.slug}-{gift.num}"
+                    
+                    if listing_id not in self.seen_listings:
                         listing_data = {
-                            'title': gift_name,
-                            'slug': gift.slug,
-                            'number': gift.num,
-                            'price': price,
-                            'owner_id': getattr(gift, 'owner_id', None),
+                            'title': gift_name, 'slug': gift.slug, 'number': gift.num,
+                            'price': getattr(gift, 'price', None), 'owner_id': getattr(gift, 'owner_id', None),
                             'listing_id': listing_id,
                         }
-                        current_listings.append(listing_data)
                         
-                        # IMMEDIATE ALERT if new
-                        if listing_id not in self.seen_listings and self.stats['scans'] > 0:
-                            # Start alert task immediately
-                            asyncio.create_task(self.send_single_alert(listing_data))
-                            self.seen_listings.add(listing_id)
-                            self.listing_timestamps[listing_id] = datetime.now()
+                        self.seen_listings.add(listing_id)
+                        self.listing_timestamps[listing_id] = datetime.now()
+                        
+                        if not self.is_bootstrapping:
+                            self.alert_queue.put_nowait(listing_data)
                 
-                self.stats['total_listings_found'] += len(current_listings)
-                self.stats['unique_gifts_seen'].add(gift_name)
-                
-                return current_listings
-
+                return []
             except Exception as e:
-                self.stats['errors'] += 1
                 logger.debug(f"Ошибка загрузки {gift_name}: {e}")
                 return []
 
@@ -576,134 +343,64 @@ class NFTMonitor:
         try:
             raw_owner_id = listing.get('owner_id')
             if not raw_owner_id: return
-
-            # Resolve owner
             user_data = await self.check_owner(self.client, raw_owner_id)
-            if not user_data: return
-
-            user_id_num = user_data['id']
-            if user_id_num in self.banned_users: return
+            if not user_data or user_data['id'] in self.banned_users: return
 
             link = f"https://t.me/nft/{listing['slug']}-{listing['number']}"
-            price_text = ""
-            if listing.get('price'):
-                 amount = getattr(listing['price'], 'amount', listing['price'])
-                 price_text = f"\n💰 {amount} ⭐️"
-
-            msg = f"{link}\n\n🎁 **{listing['title']}** `#{listing['number']}`{price_text}\n👤 {user_data['display_name']}"
+            price = f"\n💰 {getattr(listing['price'], 'amount', listing['price'])} ⭐️" if listing.get('price') else ""
+            msg = f"{link}\n\n🎁 **{listing['title']}** `#{listing['number']}`{price}\n👤 {user_data['display_name']}"
             
-            user_link = f"https://t.me/{user_data['username']}" if user_data['username'] else f"tg://user?id={user_id_num}"
-            profile_btn = Button.url("🔗 Профиль", user_link)
-            take_btn = Button.inline("👤 Взять в работу", data=f"take_{user_id_num}".encode())
-            ban_btn = Button.inline("🚫 Заблокировать", data=f"ban_{user_id_num}".encode())
+            u_link = f"https://t.me/{user_data['username']}" if user_data['username'] else f"tg://user?id={user_data['id']}"
+            btns = [[Button.url("🔗 Профиль", u_link)], [Button.inline("👤 Взять в работу", data=f"take_{user_data['id']}"), Button.inline("🚫 Заблокировать", data=f"ban_{user_data['id']}")]]
             
-            await self.safe_request(
-                self.bot_client, self.bot_client.send_message, config.GROUP_ID,
-                msg, link_preview=True, parse_mode='Markdown',
-                buttons=[[profile_btn], [take_btn, ban_btn]], critical=False
-            )
+            await self.safe_request(self.bot_client, self.bot_client.send_message, config.GROUP_ID, msg, link_preview=True, parse_mode='Markdown', buttons=btns)
             self.stats['alerts'] += 1
-            
-            self.listings_history.append({
-                'timestamp': datetime.now().isoformat(),
-                'title': listing['title'], 'slug': listing['slug'], 'number': listing['number'],
-                'price': str(listing.get('price')), 'listing_id': listing['listing_id'],
-                'owner': user_data['display_name'], 'link': link
-            })
-            current_hour = datetime.now().strftime('%Y-%m-%d %H:00')
-            self.stats['hourly_alerts'][current_hour] = self.stats['hourly_alerts'].get(current_hour, 0) + 1
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки алерта: {e}")
+            self.listings_history.append({'timestamp': datetime.now().isoformat(), 'title': listing['title'], 'owner': user_data['display_name'], 'link': link})
+        except Exception as e: logger.error(f"Alert error: {e}")
 
     async def scan_all_gifts(self, client: TelegramClient, gifts: List[dict]):
-        if not gifts: return
-        
         shuffled = gifts.copy()
         random.shuffle(shuffled)
-        
-        # Reduced concurrency for stability
-        semaphore = asyncio.Semaphore(3) 
-        batch_size = 3
-        
+        semaphore = asyncio.Semaphore(2) # VERY conservative concurrency to stop timeouts
+        batch_size = 2
         for i in range(0, len(shuffled), batch_size):
             if not self.check_circuit_breaker(): break
-            
-            batch = shuffled[i:i+batch_size]
-            tasks = [self.fetch_and_process_listing(client, g['id'], g['title'], semaphore) for g in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Seed base on initial scan
-            if self.stats['scans'] == 0:
-                for res in results:
-                    if isinstance(res, list):
-                        for l in res:
-                            self.seen_listings.add(l['listing_id'])
-                            self.listing_timestamps[l['listing_id']] = datetime.now()
-
-            await asyncio.sleep(random.uniform(2.0, 4.0)) # Pause between batches
+            tasks = [self.fetch_and_process_listing(client, g['id'], g['title'], semaphore) for g in shuffled[i:i+batch_size]]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(random.uniform(2.0, 4.0))
 
     async def run(self):
         logger.info("=" * 60)
-        logger.info("NFT MONITOR by wortexhf [FAST & STABLE MODE]")
+        logger.info("NFT MONITOR by wortexhf [STABLE MODE]")
         logger.info("=" * 60)
-        
-        self.load_stats()
-        self.load_history()
-        self.load_banned_users()
-        self.load_taken_users()
-        
-        keepalive = health_monitor = stats_saver = None
+        self.load_stats(); self.load_history(); self.load_banned_users(); self.load_taken_users()
         
         try:
             await self.client.start()
             await self.bot_client.start(bot_token=config.BOT_TOKEN)
-            
             self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=b"ban_"))
             self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=b"take_"))
             
-            me = await self.client.get_me()
-            logger.info(f"✓ Подключено: {me.first_name}")
-            
-            keepalive = asyncio.create_task(self.keepalive_task(self.client))
-            health_monitor = asyncio.create_task(self.health_monitor_task())
-            stats_saver = asyncio.create_task(self.stats_saver_task())
+            # Start controlled alert worker
+            asyncio.create_task(self.alert_worker())
             
             gifts = await self.get_available_gifts(self.client)
             if not gifts: return
             
-            logger.info("🔍 Начальное сканирование...")
+            logger.info("🔍 Начальное сканирование (без алертов)...")
+            self.is_bootstrapping = True
             await self.scan_all_gifts(self.client, gifts)
+            self.is_bootstrapping = False
             logger.info(f"✓ База: {len(self.seen_listings)} листингов. Мониторинг запущен.")
             
             while True:
-                try:
-                    if not await self.ensure_connected(self.client):
-                        await asyncio.sleep(30); continue
-                    
-                    self.stats['scans'] += 1
-                    logger.info(f"СКАН #{self.stats['scans']} (Алертов: {self.stats['alerts']})")
-                    
-                    await self.scan_all_gifts(self.client, gifts)
-                    
-                    self.cleanup_old()
-                    self.update_health()
-                    
-                    delay = random.randint(*self.get_adaptive_delay())
-                    await asyncio.sleep(delay)
-                    
-                except Exception as e:
-                    logger.error(f"❌ Ошибка цикла: {e}")
-                    await asyncio.sleep(30)
-        
-        except KeyboardInterrupt:
-            logger.info("\n⏹ Остановлено")
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка: {e}")
+                if not await self.ensure_connected(self.client):
+                    await asyncio.sleep(30); continue
+                self.stats['scans'] += 1
+                logger.info(f"СКАН #{self.stats['scans']} (Всего алертов: {self.stats['alerts']})")
+                await self.scan_all_gifts(self.client, gifts)
+                self.save_stats(); self.save_taken_users()
+                await asyncio.sleep(random.randint(*self.get_adaptive_delay()))
+        except Exception as e: logger.error(f"Критическая ошибка: {e}")
         finally:
-            for t in [keepalive, health_monitor, stats_saver]:
-                if t: t.cancel()
-            self.save_stats()
-            self.save_taken_users()
-            await self.client.disconnect()
-            await self.bot_client.disconnect()
+            await self.client.disconnect(); await self.bot_client.disconnect()
