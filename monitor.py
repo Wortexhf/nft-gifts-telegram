@@ -88,6 +88,34 @@ class NFTMonitor:
                 json.dump(self.taken_users, f, ensure_ascii=False, indent=2)
         except: pass
 
+    def load_stats(self):
+        try:
+            if config.STATS_FILE.exists():
+                with open(config.STATS_FILE, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                    for key in ['scans', 'alerts', 'total_listings_found']:
+                        if key in loaded: self.stats[key] = loaded[key]
+                    if 'unique_gifts_seen' in loaded:
+                        self.stats['unique_gifts_seen'] = set(loaded['unique_gifts_seen'])
+                    logger.info("✓ Статистика завантажена")
+        except: pass
+
+    def save_stats(self):
+        try:
+            st = self.stats.copy()
+            st['unique_gifts_seen'] = list(self.stats['unique_gifts_seen'])
+            with open(config.STATS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(st, f, ensure_ascii=False, indent=2)
+        except: pass
+
+    def load_history(self):
+        try:
+            if config.HISTORY_FILE.exists():
+                with open(config.HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    self.listings_history = json.load(f)
+                logger.info(f"✓ Історія завантажена")
+        except: pass
+
     async def handle_ban_callback(self, event):
         try:
             data = event.data.decode()
@@ -205,7 +233,7 @@ class NFTMonitor:
                 p_btn = Button.inline("🔗 Профіль", data=f"prof_{uid}".encode())
 
             final_text = f"{link}\n\n🎁 **{gift_name}** `#{gift.num}`{price}\n👤 {user_data['name']}"
-            btns = [[p_btn], [Button.inline("👤 Взять в работу", data=f"take_{uid}".encode()), Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]]
+            btns = [[p_btn], [Button.inline("👤 Взять в роботу", data=f"take_{uid}".encode()), Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]]
             await sent_msg.edit(final_text, buttons=btns, link_preview=True)
             self.stats['alerts'] += 1
         except:
