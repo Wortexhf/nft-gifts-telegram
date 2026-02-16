@@ -512,15 +512,20 @@ class NFTMonitor:
                     if not self.check_circuit_breaker() or not await self.ensure_connected(client):
                         return
                     
-                    # Attempt to check owner, but don't block alert if it fails
-                    owner = await self.check_owner(client, listing.get('owner_id'))
+                    raw_owner_id = listing.get('owner_id')
                     
-                    if not owner:
-                        owner = "Unknown/Hidden"
-                        # We no longer skip alerts if owner is missing
-                        # self.stats['skipped_no_owner'] += 1
-                        # return
+                    # Attempt to check owner details
+                    owner = await self.check_owner(client, raw_owner_id)
                     
+                    # Fallback logic ensuring clickable link if ID exists
+                    if not owner or owner == "Unknown/Hidden":
+                        if raw_owner_id:
+                            # Extract integer ID if it's an object
+                            user_id = raw_owner_id.user_id if hasattr(raw_owner_id, 'user_id') else raw_owner_id
+                            owner = f"[User {user_id}](tg://user?id={user_id})"
+                        else:
+                            owner = "Hidden"
+
                     link = f"https://t.me/nft/{listing['slug']}-{listing['number']}"
                     
                     price_text = ""
