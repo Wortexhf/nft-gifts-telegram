@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Set
 from collections import deque
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, types
 from telethon.tl.custom import Button
 from telethon.errors import (
     FloodWaitError, BadRequestError, RPCError, NetworkMigrateError, 
@@ -16,6 +16,7 @@ from telethon.errors import (
 )
 from telethon.tl.functions.payments import GetResaleStarGiftsRequest, GetStarGiftsRequest
 from telethon.tl.functions.updates import GetStateRequest
+from telethon.tl.functions.users import GetFullUserRequest
 
 import config
 from utils import logger
@@ -145,9 +146,9 @@ class NFTMonitor:
             
             await event.answer(f"✅ Вы взяли этого продавца!", alert=False)
             
-            # Better profile link logic using dictionary cache
             user_id_int = int(target_user_id)
             user_link = f"tg://user?id={user_id_int}"
+            
             if user_id_int in self.owner_cache:
                 user_data = self.owner_cache[user_id_int][0]
                 if user_data and user_data.get('username'):
@@ -160,7 +161,7 @@ class NFTMonitor:
                 profile_btn = Button.url("🔗 Профиль", user_link)
                 ban_btn = Button.inline("🚫 Заблокировать", data=f"ban_{target_user_id}".encode())
                 
-                await msg.edit(new_text, buttons=[profile_btn, ban_btn], link_preview=True)
+                await msg.edit(new_text, buttons=[[profile_btn], [ban_btn]], link_preview=True)
             except Exception as e:
                 logger.error(f"Ошибка редактирования сообщения при взятии: {e}")
 
@@ -468,13 +469,12 @@ class NFTMonitor:
             return None
         
         try:
-            # Extract user ID and ensure it's likely a user
+            # Extract user ID and ensure it's a PeerUser
             if hasattr(owner_id, 'user_id'):
                 user_id = owner_id.user_id
             elif isinstance(owner_id, int):
                 user_id = owner_id
             else:
-                # Skip channels or other peer types as per user request
                 return None
             
             if user_id in self.owner_cache:
@@ -488,21 +488,31 @@ class NFTMonitor:
             
             await asyncio.sleep(random.uniform(0.3, 0.8))
             
+            # Use get_entity to resolve the user
             entity = await self.safe_request(client, client.get_entity, owner_id, max_retries=2, critical=False)
-            # Ensure it's a user entity (has first_name) and not a channel/bot
-            if not entity or not hasattr(entity, 'first_name') or getattr(entity, 'broadcast', False):
+            
+            # STRICT FILTER: Only resolve real users, skip channels/broadcasts/bots
+            if not entity or not isinstance(entity, types.User) or entity.bot:
                 self.owner_cache[user_id] = (None, datetime.now())
                 return None
             
+            # Verify profile accessibility by getting full info (like in scrape_telegram_nft.py)
+            try:
+                await self.safe_request(client, client, GetFullUserRequest(entity), max_retries=1)
+            except:
+                # If we can't get full user info, the profile might be inaccessible
+                self.owner_cache[user_id] = (None, datetime.now())
+                return None
+
             display_name = entity.first_name or "Unknown"
-            if getattr(entity, 'last_name', None):
+            if entity.last_name:
                 display_name += f" {entity.last_name}"
             display_name = display_name.replace('[', '').replace(']', '')
             
             user_data = {
                 'id': user_id,
                 'display_name': display_name,
-                'username': getattr(entity, 'username', None)
+                'username': entity.username
             }
             
             self.owner_cache[user_id] = (user_data, datetime.now())
@@ -638,7 +648,7 @@ class NFTMonitor:
                         self.stats['skipped_no_owner'] += 1
                         return
 
-                    # Filter: Only those where we can enter profile (users)
+                    # Resolve owner and verify it's an accessible User profile
                     user_data = await self.check_owner(self.client, raw_owner_id)
                     if not user_data:
                         logger.debug(f"👤 Skip lot: inaccessible profile or channel {raw_owner_id}")
@@ -660,8 +670,8 @@ class NFTMonitor:
                          amount = getattr(listing['price'], 'amount', listing['price'])
                          price_text = f"\n💰 {amount} ⭐️"
 
-                    # Reorder: Gift link first for preview, then info
-                    msg = f"{link}\n\n**{listing['title']}** `#{listing['number']}`{price_text}\n👤 {user_data['display_name']}"
+                    # REORDER: Link first for GIFT preview, then details. NO LEVEL.
+                    msg = f"{link}\n\n🎁 **{listing['title']}** `#{listing['number']}`{price_text}\n👤 {user_data['display_name']}"
                     
                     # Buttons
                     user_link = f"https://t.me/{user_data['username']}" if user_data['username'] else f"tg://user?id={user_id_num}"
