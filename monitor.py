@@ -155,10 +155,9 @@ class NFTMonitor:
         total = sum(1 for ts, _ in self.error_history if ts > window)
         return errs / max(total, 1)
 
-    def get_adaptive_delay(self) -> Tuple[int, int]:
-        er = self.get_error_rate()
-        m = 2.5 if er > 0.3 else 1.8 if er > 0.15 else 1.0
-        return (int(config.BASE_SCAN_INTERVAL[0] * m), int(config.BASE_SCAN_INTERVAL[1] * m))
+    def update_health(self):
+        self.health_status["error_rate"] = self.get_error_rate()
+        if self.stats['successful_requests'] > 0: self.health_status["last_success"] = datetime.now()
 
     async def safe_request(self, client, func, *args, max_retries=3, critical=False, **kwargs):
         for attempt in range(max_retries):
@@ -170,7 +169,6 @@ class NFTMonitor:
             except FloodWaitError as e:
                 logger.warning(f"⏱ FloodWait {e.seconds}с"); await asyncio.sleep(e.seconds + 5)
             except Exception:
-                if attempt == max_retries - 1: logger.error(f"❌ RPC Error")
                 await asyncio.sleep(2)
         return None
 
@@ -188,13 +186,12 @@ class NFTMonitor:
             d, ts = self.owner_cache[uid]
             if datetime.now() - ts < timedelta(hours=12): return d
         
-        # Resolve entity strictly as User
         try:
             entity = await self.client.get_entity(owner_id)
             if not isinstance(entity, types.User) or entity.bot:
                 self.owner_cache[uid] = (None, datetime.now()); return None
             
-            # Verify accessibility (GetFullUser)
+            # Accessibility check
             await self.client(GetFullUserRequest(entity))
             
             name = ((entity.first_name or "") + " " + (entity.last_name or "")).strip() or "Unknown"
@@ -207,7 +204,6 @@ class NFTMonitor:
     async def fetch_and_process(self, gift_id, gift_name, semaphore):
         async with semaphore:
             try:
-                await asyncio.sleep(random.uniform(0.3, 0.8))
                 res = await self.safe_request(self.client, self.client, GetResaleStarGiftsRequest(
                     gift_id=gift_id, offset="", limit=config.FETCH_LIMIT, sort_by_num=False, sort_by_price=False
                 ))
@@ -223,43 +219,37 @@ class NFTMonitor:
             except: pass
 
     async def immediate_alert(self, gift, gift_name):
-        """Send link immediately, then resolve info and edit (Fast logic)"""
         sent_msg = None
         try:
-            uid = None
-            if hasattr(gift, 'owner_id') and gift.owner_id:
-                oid = gift.owner_id
-                uid = getattr(oid, 'user_id', oid if isinstance(oid, int) else getattr(oid, 'id', None))
-            
-            if not uid: return
+            # 1. Immediate Peer Check (Logic from zrazok)
+            if not (hasattr(gift, 'owner_id') and isinstance(gift.owner_id, types.PeerUser)):
+                return 
+
+            uid = gift.owner_id.user_id
             link = f"https://t.me/nft/{gift.slug}-{gift.num}"
             price = f"\n💰 {getattr(gift.price, 'amount', gift.price)} ⭐️" if hasattr(gift, 'price') and gift.price else ""
             
-            # 1. Initial message (Fast)
+            # 2. Fast Send
             msg_text = f"{link}\n\n🎁 **{gift_name}** `#{gift.num}`{price}\n👤 ID: {uid}"
             sent_msg = await self.bot_client.send_message(config.GROUP_ID, msg_text, link_preview=True)
             if not sent_msg: return
 
-            # 2. Resolve profile
+            # 3. Resolve & Filter
             user_data = await self.check_owner(uid)
-            
-            # 3. STRICT FILTER: If profile inaccessible or user is banned - DELETE MESSAGE
             if not user_data or uid in self.banned_users:
                 await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id])
                 return
 
-            # 4. Success - Update with buttons
+            # 4. Rich Update
             u_link = f"https://t.me/{user_data['username']}" if user_data['username'] else f"tg://user?id={uid}"
             final_text = f"{link}\n\n🎁 **{gift_name}** `#{gift.num}`{price}\n👤 {user_data['name']}"
             btns = [[Button.url("🔗 Профиль", u_link)], [Button.inline("👤 Взять в работу", data=f"take_{uid}"), Button.inline("🚫 Заблокировать", data=f"ban_{uid}")]]
-            
             await sent_msg.edit(final_text, buttons=btns, link_preview=True)
             self.stats['alerts'] += 1
-        except Exception as e:
+        except Exception:
             if sent_msg:
                 try: await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id])
                 except: pass
-            logger.debug(f"Alert error: {e}")
 
     async def scan_all(self, gifts):
         random.shuffle(gifts)
@@ -276,16 +266,13 @@ class NFTMonitor:
         try:
             await self.client.start(); await self.bot_client.start(bot_token=config.BOT_TOKEN)
             gifts = [{'id': g.id, 'title': g.title} for g in (await self.client(GetStarGiftsRequest(hash=0))).gifts if g.title in config.TARGET_GIFT_NAMES]
-            
-            logger.info("🔍 Начальное наполнение базы...")
             self.is_bootstrapping = True; await self.scan_all(gifts); self.is_bootstrapping = False
             logger.info(f"✓ База готова: {len(self.seen_listings)} листингов.")
-            
             while True:
                 self.stats['scans'] += 1; self.current_scan_found = 0
                 await self.scan_all(gifts)
                 if self.current_scan_found > 0: logger.info(f"🆕 Найдено новых: {self.current_scan_found}")
                 self.save_stats(); self.save_taken_users()
-                await asyncio.sleep(random.randint(*self.get_adaptive_delay()))
+                await asyncio.sleep(random.randint(5, 10))
         except Exception as e: logger.error(f"Критическая ошибка: {e}")
         finally: await self.client.disconnect(); await self.bot_client.disconnect()
