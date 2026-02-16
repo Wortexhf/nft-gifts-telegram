@@ -37,21 +37,30 @@ TARGET_GIFT_NAMES = [
     "Astral Shard", "Swiss Watch", "Voodoo Doll"
 ]
 
-BASE_SCAN_INTERVAL = (15, 30)
-CONCURRENT_REQUESTS = 5
-FETCH_LIMIT = 30
-CONCURRENT_ALERTS = 5
+# === AGGRESSIVE MODE CONFIG ===
+BASE_SCAN_INTERVAL = (5, 10)      # Reduced from (15, 30)
+CONCURRENT_REQUESTS = 5           # Keep parallel requests
+FETCH_LIMIT = 50                  # Fetch deeper (was 30) to catch items if we missed a cycle
+CONCURRENT_ALERTS = 10            # Send alerts faster
+
+# Caching
 LISTING_MEMORY_HOURS = 48
-OWNER_CACHE_TTL_HOURS = 6
-OWNER_CACHE_MAX_SIZE = 2000
+OWNER_CACHE_TTL_HOURS = 12        # Cache owners longer to save requests
+OWNER_CACHE_MAX_SIZE = 5000
+
+# Safety & Retries
 MAX_RETRIES = 3
-REQUEST_TIMEOUT = 60
+REQUEST_TIMEOUT = 30
 KEEPALIVE_INTERVAL = 240
-MIN_REQUEST_DELAY = 2.0
-MAX_REQUEST_DELAY = 5.0
-BATCH_DELAY_MIN = 4.0
-BATCH_DELAY_MAX = 8.0
-CIRCUIT_BREAKER_THRESHOLD = 3
-CIRCUIT_BREAKER_TIMEOUT = 300
+
+# Rate Limiting (Tightened for speed)
+MIN_REQUEST_DELAY = 0.5           # Was 2.0 - minimal pause between individual reqs
+MAX_REQUEST_DELAY = 1.5           # Was 5.0
+BATCH_DELAY_MIN = 1.0             # Was 4.0 - pause between batches of 3 gifts
+BATCH_DELAY_MAX = 3.0             # Was 8.0
+
+# Circuit Breaker (Safety net)
+CIRCUIT_BREAKER_THRESHOLD = 5     # Allow a few more errors before stopping
+CIRCUIT_BREAKER_TIMEOUT = 60      # Reduce timeout if we hit a wall (was 300)
 HEALTH_CHECK_INTERVAL = 15
-SAVE_STATS_INTERVAL = 300
+SAVE_STATS_INTERVAL = 60
