@@ -12,3 +12,4 @@ monitor.log
 data/
 *.log
 *.json
+scrape_telegram_nft.py
