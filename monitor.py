@@ -40,6 +40,8 @@ class NFTMonitor:
         self.consecutive_errors = 0
         self.health_status = {"connected": True, "last_success": datetime.now(), "error_rate": 0.0}
         self.start_time = datetime.now()
+        self.last_catalog_update = datetime.now() - timedelta(hours=1)
+        self.gifts = []
         
         self.is_bootstrapping = True 
         self.current_scan_found = 0
@@ -181,13 +183,36 @@ class NFTMonitor:
             if not isinstance(entity, types.User) or entity.bot:
                 self.owner_cache[uid] = (None, datetime.now()); return None
             
-            await self.client(GetFullUserRequest(entity))
+            full = await self.client(GetFullUserRequest(entity))
             name = ((entity.first_name or "") + " " + (entity.last_name or "")).strip() or "Unknown"
-            data = {'id': uid, 'name': name.replace('[', '').replace(']', ''), 'username': entity.username}
+            
+            premium = getattr(entity, 'premium', False)
+            price = None
+            if hasattr(full.full_user, 'stars_rating') and full.full_user.stars_rating:
+                price = getattr(full.full_user.stars_rating, 'message_price', None)
+
+            data = {
+                'id': uid, 
+                'name': name.replace('[', '').replace(']', ''), 
+                'username': entity.username,
+                'premium': premium,
+                'price': price
+            }
             self.owner_cache[uid] = (data, datetime.now())
             return data
         except:
             self.owner_cache[uid] = (None, datetime.now()); return None
+
+    async def update_catalog(self):
+        try:
+            logger.info("📡 Оновлення каталогу подарунків...")
+            res = await self.client(GetStarGiftsRequest(hash=0))
+            self.gifts = [{'id': g.id, 'title': g.title} for g in res.gifts if g.title in config.TARGET_GIFT_NAMES]
+            self.last_catalog_update = datetime.now()
+            return True
+        except Exception as e:
+            logger.error(f"Помилка оновлення каталогу: {e}")
+            return False
 
     async def fetch_and_process(self, gift_id, gift_name, semaphore):
         async with semaphore:
@@ -212,15 +237,19 @@ class NFTMonitor:
                         if uid:
                             self.current_scan_found += 1
                             asyncio.create_task(self.immediate_alert(gift, gift_name, uid))
-            except Exception as e:
-                pass
+            except FloodWaitError as e:
+                logger.warning(f"⚠️ FLOOD: Очікування {e.seconds}с для {gift_name}")
+                await asyncio.sleep(e.seconds + 1)
+            except Exception: pass
 
     async def immediate_alert(self, gift, gift_name, uid):
         sent_msg = None
         try:
             link = f"https://t.me/nft/{gift.slug}-{gift.num}"
-            price = f"\n💰 {getattr(gift.price, 'amount', gift.price)} ⭐️" if hasattr(gift, 'price') and gift.price else ""
-            msg_text = f"{link}\n\n🎁 **{gift_name}** `#{gift.num}`{price}\n👤 Пошук продавця..."
+            price_stars = f"💰 {getattr(gift.price, 'amount', gift.price)} ⭐️" if hasattr(gift, 'price') and gift.price else ""
+            
+            # Initial placeholder
+            msg_text = f"🎁 **Обнаружен новый подарок на маркете**\n\n{link}\n\n🎁 **{gift_name}** `#{gift.num}`\n{price_stars}\n\n👤 Пошук продавця..."
             sent_msg = await self.bot_client.send_message(config.GROUP_ID, msg_text, link_preview=True)
             if not sent_msg: return
 
@@ -228,17 +257,29 @@ class NFTMonitor:
             if not user_data or uid in self.banned_users:
                 await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id]); return
 
-            # SMART BUTTON: Link for username, Callback for ID
+            # Formatting final message
+            u_name = f"@{user_data['username']}" if user_data['username'] else user_data['name']
+            u_info = f"👤 **Пользователь:** {u_name} `[{uid}]`\n"
+            u_info += f"⭐ **Статус:** {'Premium' if user_data['premium'] else 'Обычный'}\n"
+            if user_data['price']: 
+                u_info += f"💬 **Сообщения:** {user_data['price']} ⭐️"
+
+            final_text = f"🎁 **Обнаружен новый подарок на маркете**\n\n{link}\n\n🎁 **{gift_name}** `#{gift.num}`\n{price_stars}\n\n{u_info}"
+            
             if user_data.get('username'):
                 p_btn = Button.url("🔗 Профіль", f"https://t.me/{user_data['username']}")
             else:
                 p_btn = Button.inline("🔗 Профіль", data=f"prof_{uid}".encode())
 
-            final_text = f"{link}\n\n🎁 **{gift_name}** `#{gift.num}`{price}\n👤 {user_data['name']}"
-            btns = [[p_btn], [Button.inline("👤 Взять в роботу", data=f"take_{uid}".encode()), Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]]
+            btns = [
+                [p_btn],
+                [Button.inline("👤 Взять в роботу", data=f"take_{uid}".encode()), 
+                 Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]
+            ]
+            
             await sent_msg.edit(final_text, buttons=btns, link_preview=True)
             self.stats['alerts'] += 1
-        except Exception as e:
+        except Exception:
             if sent_msg:
                 try: await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id])
                 except: pass
@@ -262,12 +303,15 @@ class NFTMonitor:
             self.bot_client.add_event_handler(self.handle_prof_callback, events.CallbackQuery(pattern=re.compile(b"prof_.*")))
             self.bot_client.add_event_handler(self.handle_start, events.NewMessage(pattern='/start'))
             
-            gifts = [{'id': g.id, 'title': g.title} for g in (await self.client(GetStarGiftsRequest(hash=0))).gifts if g.title in config.TARGET_GIFT_NAMES]
-            self.is_bootstrapping = True; await self.scan_all(gifts); self.is_bootstrapping = False
+            await self.update_catalog()
+            self.is_bootstrapping = True; await self.scan_all(self.gifts); self.is_bootstrapping = False
             logger.info(f"✓ База готова: {len(self.seen_listings)} листингов.")
             while True:
+                if datetime.now() - self.last_catalog_update > timedelta(minutes=30):
+                    await self.update_catalog()
+
                 self.stats['scans'] += 1; self.current_scan_found = 0
-                await self.scan_all(gifts)
+                await self.scan_all(self.gifts)
                 if self.current_scan_found > 0: logger.info(f"🆕 Знайдено нових: {self.current_scan_found}")
                 self.save_stats(); self.save_taken_users()
                 await asyncio.sleep(random.randint(3, 7))
