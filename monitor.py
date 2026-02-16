@@ -484,7 +484,7 @@ class NFTMonitor:
             if not await self.ensure_connected(client):
                 return None
             
-            await asyncio.sleep(random.uniform(0.2, 0.5))
+            await asyncio.sleep(random.uniform(0.3, 0.7))
             
             entity = await self.safe_request(client, client.get_entity, owner_id, max_retries=2, critical=False)
             
@@ -519,13 +519,12 @@ class NFTMonitor:
         gift_name: str,
         semaphore: asyncio.Semaphore
     ) -> List[dict]:
-        """Fetches listings and returns them for overall scan logic, but alerts on-the-fly inside"""
         async with semaphore:
             try:
                 if not self.check_circuit_breaker() or not await self.ensure_connected(client):
                     return []
                 
-                await asyncio.sleep(random.uniform(0.5, 1.2))
+                await asyncio.sleep(random.uniform(1.0, 2.5)) # Increased delay for stability
                 
                 result = await self.safe_request(
                     client,
@@ -558,7 +557,7 @@ class NFTMonitor:
                         
                         # IMMEDIATE ALERT if new
                         if listing_id not in self.seen_listings and self.stats['scans'] > 0:
-                            # We check self.stats['scans'] > 0 to avoid flooding on initial scan
+                            # Start alert task immediately
                             asyncio.create_task(self.send_single_alert(listing_data))
                             self.seen_listings.add(listing_id)
                             self.listing_timestamps[listing_id] = datetime.now()
@@ -576,16 +575,14 @@ class NFTMonitor:
     async def send_single_alert(self, listing: dict) -> None:
         try:
             raw_owner_id = listing.get('owner_id')
-            if not raw_owner_id:
-                return
+            if not raw_owner_id: return
 
+            # Resolve owner
             user_data = await self.check_owner(self.client, raw_owner_id)
-            if not user_data:
-                return
+            if not user_data: return
 
             user_id_num = user_data['id']
-            if user_id_num in self.banned_users:
-                return
+            if user_id_num in self.banned_users: return
 
             link = f"https://t.me/nft/{listing['slug']}-{listing['number']}"
             price_text = ""
@@ -607,7 +604,6 @@ class NFTMonitor:
             )
             self.stats['alerts'] += 1
             
-            # History and Stats
             self.listings_history.append({
                 'timestamp': datetime.now().isoformat(),
                 'title': listing['title'], 'slug': listing['slug'], 'number': listing['number'],
@@ -618,7 +614,7 @@ class NFTMonitor:
             self.stats['hourly_alerts'][current_hour] = self.stats['hourly_alerts'].get(current_hour, 0) + 1
             
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки алерту: {e}")
+            logger.error(f"❌ Ошибка отправки алерта: {e}")
 
     async def scan_all_gifts(self, client: TelegramClient, gifts: List[dict]):
         if not gifts: return
@@ -626,7 +622,8 @@ class NFTMonitor:
         shuffled = gifts.copy()
         random.shuffle(shuffled)
         
-        semaphore = asyncio.Semaphore(5) # Increased concurrency
+        # Reduced concurrency for stability
+        semaphore = asyncio.Semaphore(3) 
         batch_size = 3
         
         for i in range(0, len(shuffled), batch_size):
@@ -636,7 +633,7 @@ class NFTMonitor:
             tasks = [self.fetch_and_process_listing(client, g['id'], g['title'], semaphore) for g in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            # Update seen listings from initial scan if needed
+            # Seed base on initial scan
             if self.stats['scans'] == 0:
                 for res in results:
                     if isinstance(res, list):
@@ -644,11 +641,11 @@ class NFTMonitor:
                             self.seen_listings.add(l['listing_id'])
                             self.listing_timestamps[l['listing_id']] = datetime.now()
 
-            await asyncio.sleep(random.uniform(1.0, 2.0))
+            await asyncio.sleep(random.uniform(2.0, 4.0)) # Pause between batches
 
     async def run(self):
         logger.info("=" * 60)
-        logger.info("NFT MONITOR by wortexhf [FAST MODE]")
+        logger.info("NFT MONITOR by wortexhf [FAST & STABLE MODE]")
         logger.info("=" * 60)
         
         self.load_stats()
@@ -685,7 +682,7 @@ class NFTMonitor:
                         await asyncio.sleep(30); continue
                     
                     self.stats['scans'] += 1
-                    logger.info(f"СКАН #{self.stats['scans']} (Найдено: {self.stats['alerts']})")
+                    logger.info(f"СКАН #{self.stats['scans']} (Алертов: {self.stats['alerts']})")
                     
                     await self.scan_all_gifts(self.client, gifts)
                     
