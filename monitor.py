@@ -524,7 +524,9 @@ class NFTMonitor:
                             user_id = raw_owner_id.user_id if hasattr(raw_owner_id, 'user_id') else raw_owner_id
                             owner = f"[User {user_id}](tg://user?id={user_id})"
                         else:
-                            owner = "Hidden"
+                            # SKIP if we absolutely cannot make a link
+                            self.stats['skipped_no_owner'] += 1
+                            return
 
                     link = f"https://t.me/nft/{listing['slug']}-{listing['number']}"
                     
