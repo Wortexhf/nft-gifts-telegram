@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Set
 from collections import deque
 
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from telethon.tl.custom import Button
 from telethon.errors import (
     FloodWaitError, BadRequestError, RPCError, NetworkMigrateError, 
@@ -19,11 +19,14 @@ from telethon.tl.functions.updates import GetStateRequest
 import config
 from utils import logger
 
+BANNED_USERS_FILE = config.DATA_DIR / "banned_users.json"
+
 class NFTMonitor:
     def __init__(self):
         self.seen_listings: Set[str] = set()
         self.listing_timestamps: Dict[str, datetime] = {}
         self.owner_cache: Dict[int, Tuple[Optional[str], datetime]] = {}
+        self.banned_users: Set[int] = set()
         self.last_request_times = deque(maxlen=50)
         self.error_history = deque(maxlen=100)
         self.circuit_breaker_until: Optional[datetime] = None
@@ -53,6 +56,45 @@ class NFTMonitor:
             request_retries=3,
             flood_sleep_threshold=180
         )
+
+    def load_banned_users(self):
+        try:
+            if BANNED_USERS_FILE.exists():
+                with open(BANNED_USERS_FILE, 'r', encoding='utf-8') as f:
+                    self.banned_users = set(json.load(f))
+                logger.info(f"✓ Загружено {len(self.banned_users)} забаненных пользователей")
+        except Exception as e:
+            logger.warning(f"Не удалось загрузить бан-лист: {e}")
+
+    def save_banned_users(self):
+        try:
+            with open(BANNED_USERS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(list(self.banned_users), f)
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения бан-листа: {e}")
+
+    async def handle_ban_callback(self, event):
+        try:
+            data = event.data.decode()
+            if not data.startswith("ban_"):
+                return
+            
+            user_id = int(data.split("_")[1])
+            self.banned_users.add(user_id)
+            self.save_banned_users()
+            
+            await event.answer("🚫 Користувач заблокований!", alert=True)
+            
+            # Edit the message to show it's banned
+            try:
+                msg = await event.get_message()
+                new_text = msg.text + "\n\n🚫 **АВТОР ЗАБЛОКОВАНИЙ**"
+                await msg.edit(new_text, buttons=None)
+            except Exception as e:
+                logger.error(f"Ошибка редактирования сообщения при бане: {e}")
+                
+        except Exception as e:
+            logger.error(f"Ошибка в handle_ban_callback: {e}")
 
     def load_stats(self):
         try:
@@ -520,6 +562,11 @@ class NFTMonitor:
                     raw_owner_id = listing.get('owner_id')
                     user_id_num = raw_owner_id.user_id if hasattr(raw_owner_id, 'user_id') else raw_owner_id
                     
+                    # Check if user is banned
+                    if user_id_num in self.banned_users:
+                        logger.info(f"🚫 Пропуск лота от забаненного юзера {user_id_num}")
+                        return
+
                     # Skip if we already sent an alert for this author in this batch
                     if user_id_num in seen_authors_in_batch:
                         return
@@ -551,8 +598,9 @@ class NFTMonitor:
 
                     msg = f"**{listing['title']}** `#{listing['number']}`{price_text}\n👤 {owner}\n{link}"
                     
-                    # Create button
-                    buy_button = Button.url("Купить", link)
+                    # Create Ban button
+                    # IMPORTANT: Callback data size limit is 64 bytes.
+                    ban_button = Button.inline("🚫 Заблокувати", data=f"ban_{user_id_num}".encode())
                     
                     await asyncio.sleep(random.uniform(1.5, 3.5))
                     
@@ -563,7 +611,7 @@ class NFTMonitor:
                         msg,
                         link_preview=True,
                         parse_mode='Markdown',
-                        buttons=[buy_button],
+                        buttons=[ban_button],
                         critical=False
                     )
                     self.stats['alerts'] += 1
@@ -598,6 +646,7 @@ class NFTMonitor:
         
         self.load_stats()
         self.load_history()
+        self.load_banned_users()  # Load banned users
         
         chat_entity = None
         keepalive = None
@@ -606,6 +655,10 @@ class NFTMonitor:
         
         try:
             await self.client.start()
+            
+            # Register callback handler for ban buttons
+            self.client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=b"ban_"))
+            
             await asyncio.sleep(random.uniform(3, 6))
             me = await self.client.get_me()
             logger.info(f"✓ Подключено: {me.first_name}")
