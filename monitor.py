@@ -39,7 +39,7 @@ class NFTMonitor:
         self.start_time = datetime.now()
         
         self.alert_queue = asyncio.Queue()
-        self.is_bootstrapping = True # Flag to skip alerts on first run
+        self.is_bootstrapping = True 
         
         self.stats = {
             'scans': 0, 'alerts': 0, 'errors': 0, 'skipped_no_owner': 0,
@@ -272,17 +272,28 @@ class NFTMonitor:
         return True
 
     async def alert_worker(self):
-        """Dedicated worker to process alerts one-by-one to avoid flooding and timeouts"""
         while True:
             listing = await self.alert_queue.get()
             try:
                 await self.send_single_alert(listing)
-                # Small delay between user-resolving and sending alerts
                 await asyncio.sleep(random.uniform(1.5, 3.0))
             except Exception as e:
                 logger.error(f"Worker error: {e}")
             finally:
                 self.alert_queue.task_done()
+
+    async def get_available_gifts(self, client: TelegramClient) -> List[dict]:
+        try:
+            if not await self.ensure_connected(client): return []
+            result = await self.safe_request(client, client, GetStarGiftsRequest(hash=0), critical=True)
+            if not result or not hasattr(result, 'gifts'): return []
+            gifts = [{'id': gift.id, 'title': gift.title} for gift in result.gifts if hasattr(gift, 'title') and gift.title in config.TARGET_GIFT_NAMES]
+            logger.info(f"✓ Найдено {len(gifts)} целевых подарков")
+            return gifts
+        except Exception as e:
+            self.stats['errors'] += 1
+            logger.error(f"❌ Ошибка получения подарков: {e}")
+            return []
 
     async def check_owner(self, client: TelegramClient, owner_id) -> Optional[dict]:
         if not owner_id: return None
@@ -361,7 +372,7 @@ class NFTMonitor:
     async def scan_all_gifts(self, client: TelegramClient, gifts: List[dict]):
         shuffled = gifts.copy()
         random.shuffle(shuffled)
-        semaphore = asyncio.Semaphore(2) # VERY conservative concurrency to stop timeouts
+        semaphore = asyncio.Semaphore(2) 
         batch_size = 2
         for i in range(0, len(shuffled), batch_size):
             if not self.check_circuit_breaker(): break
@@ -381,7 +392,6 @@ class NFTMonitor:
             self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=b"ban_"))
             self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=b"take_"))
             
-            # Start controlled alert worker
             asyncio.create_task(self.alert_worker())
             
             gifts = await self.get_available_gifts(self.client)
