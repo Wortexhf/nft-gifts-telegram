@@ -505,9 +505,7 @@ class NFTMonitor:
                         return
                     
                     link = f"https://t.me/nft/{listing['slug']}-{listing['number']}"
-                    msg = f"**{listing['title']}** `#{listing['number']}`
-👤 {owner}
-{link}"
+                    msg = f"**{listing['title']}** `#{listing['number']}`\n👤 {owner}\n{link}"
                     
                     await asyncio.sleep(random.uniform(1.5, 3.5))
                     
