@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Set
 from collections import deque
 
-from telethon import TelegramClient, events, types
+from telethon import TelegramClient, events, types, functions
 from telethon.tl.custom import Button
 from telethon.errors import (
     FloodWaitError, BadRequestError, RPCError, NetworkMigrateError, 
@@ -131,6 +131,7 @@ class NFTMonitor:
     async def handle_take_callback(self, event):
         try:
             data = event.data.decode()
+            if not data.startswith("take_"): return
             uid_str = data.split("_")[1]
             sender = await event.get_sender()
             clicker_name = f"@{sender.username}" if sender.username else sender.first_name
@@ -152,23 +153,33 @@ class NFTMonitor:
     async def handle_prof_callback(self, event):
         try:
             data = event.data.decode()
+            if not data.startswith("prof_"): return
             uid = int(data.split("_")[1])
-            logger.info(f"🔗 Запит профілю для {uid} від {event.sender_id}")
+            logger.info(f"🔗 Запит профілю для {uid}")
             
+            user_data = self.owner_cache.get(uid, (None, None))[0]
+            name = user_data['name'] if user_data else "Продавець"
+            
+            # Using Markdown Mention - most reliable way for ID-based links
             u_link = f"tg://user?id={uid}"
-            if uid in self.owner_cache:
-                ud = self.owner_cache[uid][0]
-                if ud and ud.get('username'): u_link = f"https://t.me/{ud['username']}"
+            if user_data and user_data.get('username'):
+                u_link = f"https://t.me/{user_data['username']}"
+            
+            mention_link = f"[{name}]({u_link})"
             
             try:
-                await self.bot_client.send_message(event.sender_id, f"👤 **Продавець:**\n{u_link}\n\n_Натисніть на посилання вище, щоб відкрити профіль._")
+                await self.bot_client.send_message(
+                    event.sender_id, 
+                    f"👤 Продавець: **{mention_link}**\n\n_Натисніть на ім'я вище, щоб відкрити профіль._",
+                    parse_mode='Markdown'
+                )
                 await event.answer("✅ Посилання надіслано в ЛС!", alert=False)
             except:
-                await event.answer("❌ Бот не може написати вам! Спочатку натисніть 'Start' у самому боті.", alert=True)
+                await event.answer("❌ Спочатку натисніть Start у ЛС бота!", alert=True)
         except Exception as e: logger.error(f"Prof error: {e}")
 
     async def handle_start(self, event):
-        await event.respond("👋 **Бот активований!**\n\nТепер я зможу надсилати вам посилання на профілі продавців, у яких немає публічного імені (username).")
+        await event.respond("👋 **Бот активований!**\nТепер я зможу надсилати вам посилання на профілі продавців.")
 
     async def check_owner(self, owner_id) -> Optional[dict]:
         uid = owner_id.user_id if hasattr(owner_id, 'user_id') else owner_id if isinstance(owner_id, int) else None
@@ -206,8 +217,9 @@ class NFTMonitor:
                         self.listing_timestamps[listing_id] = datetime.now()
                         
                         if uid:
+                            # Populate seen_authors during bootstrapping to avoid duplicates later
                             if self.is_bootstrapping:
-                                self.seen_authors.add(uid) # Populate to skip later
+                                self.seen_authors.add(uid)
                             elif uid not in self.seen_authors:
                                 self.seen_authors.add(uid)
                                 self.current_scan_found += 1
@@ -227,6 +239,7 @@ class NFTMonitor:
             if not user_data or uid in self.banned_users:
                 await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id]); return
 
+            # Button Logic: URL for username, Callback for ID
             if user_data.get('username'):
                 p_btn = Button.url("🔗 Профіль", f"https://t.me/{user_data['username']}")
             else:
