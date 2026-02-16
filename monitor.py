@@ -27,6 +27,7 @@ class NFTMonitor:
         self.listing_timestamps: Dict[str, datetime] = {}
         self.owner_cache: Dict[int, Tuple[Optional[str], datetime]] = {}
         self.banned_users: Set[int] = set()
+        self.taken_users: Dict[str, str] = {} # user_id -> taken_by_username
         self.last_request_times = deque(maxlen=50)
         self.error_history = deque(maxlen=100)
         self.circuit_breaker_until: Optional[datetime] = None
@@ -83,18 +84,64 @@ class NFTMonitor:
             self.banned_users.add(user_id)
             self.save_banned_users()
             
-            await event.answer("🚫 Користувач заблокований!", alert=True)
+            await event.answer("🚫 Пользователь заблокирован!", alert=True)
             
             # Edit the message to show it's banned
             try:
                 msg = await event.get_message()
-                new_text = msg.text + "\n\n🚫 **АВТОР ЗАБЛОКОВАНИЙ**"
+                new_text = msg.text + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**"
                 await msg.edit(new_text, buttons=None)
             except Exception as e:
                 logger.error(f"Ошибка редактирования сообщения при бане: {e}")
                 
         except Exception as e:
             logger.error(f"Ошибка в handle_ban_callback: {e}")
+
+    async def handle_take_callback(self, event):
+        try:
+            data = event.data.decode()
+            parts = data.split("_")
+            if len(parts) < 2: 
+                return
+            
+            target_user_id = parts[1] # Keep as string for dict key
+            
+            # Get clicker info
+            sender = await event.get_sender()
+            clicker_name = f"@{sender.username}" if sender.username else sender.first_name
+            
+            # Check if already taken
+            if target_user_id in self.taken_users:
+                taken_by = self.taken_users[target_user_id]
+                await event.answer(f"⚠️ Уже занято: {taken_by}", alert=True)
+                return
+
+            # Mark as taken
+            self.taken_users[target_user_id] = clicker_name
+            
+            await event.answer(f"✅ Вы взяли этого продавца!", alert=False)
+            
+            # Construct link again to update buttons
+            try:
+                uid_int = int(target_user_id)
+                user_link = f"tg://user?id={uid_int}"
+            except:
+                user_link = f"tg://user?id={target_user_id}"
+
+            try:
+                msg = await event.get_message()
+                new_text = msg.text + f"\n\n🔒 **Взял:** {clicker_name}"
+                
+                # Update buttons: Replace "Take" with "Open Profile" + Keep "Ban"
+                profile_btn = Button.url("🔗 Профиль", user_link)
+                ban_btn = Button.inline("🚫 Заблокировать", data=f"ban_{target_user_id}".encode())
+                
+                await msg.edit(new_text, buttons=[profile_btn, ban_btn])
+            except Exception as e:
+                logger.error(f"Ошибка редактирования сообщения при взятии: {e}")
+
+        except Exception as e:
+            logger.error(f"Ошибка в handle_take_callback: {e}")
 
     def load_stats(self):
         try:
@@ -598,9 +645,9 @@ class NFTMonitor:
 
                     msg = f"**{listing['title']}** `#{listing['number']}`{price_text}\n👤 {owner}\n{link}"
                     
-                    # Create Ban button
-                    # IMPORTANT: Callback data size limit is 64 bytes.
-                    ban_button = Button.inline("🚫 Заблокувати", data=f"ban_{user_id_num}".encode())
+                    # Buttons: Take and Ban
+                    take_btn = Button.inline("👤 Взять в работу", data=f"take_{user_id_num}".encode())
+                    ban_btn = Button.inline("🚫 Заблокировать", data=f"ban_{user_id_num}".encode())
                     
                     await asyncio.sleep(random.uniform(1.5, 3.5))
                     
@@ -611,7 +658,7 @@ class NFTMonitor:
                         msg,
                         link_preview=True,
                         parse_mode='Markdown',
-                        buttons=[ban_button],
+                        buttons=[take_btn, ban_btn],
                         critical=False
                     )
                     self.stats['alerts'] += 1
@@ -656,8 +703,9 @@ class NFTMonitor:
         try:
             await self.client.start()
             
-            # Register callback handler for ban buttons
+            # Register callback handler for ban and take buttons
             self.client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=b"ban_"))
+            self.client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=b"take_"))
             
             await asyncio.sleep(random.uniform(3, 6))
             me = await self.client.get_me()
