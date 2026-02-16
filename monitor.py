@@ -257,7 +257,7 @@ class NFTMonitor:
                 if attempt == max_retries - 1 and critical: self.trigger_circuit_breaker()
                 await asyncio.sleep(random.uniform(5, 10))
             except Exception as e:
-                logger.error(f"❌ Ошибка RPC: {type(e).__name__}")
+                logger.error(f"❌ Ошибка RPC: {type(e).__name__}: {e}")
                 if attempt == max_retries - 1 and critical: self.trigger_circuit_breaker()
                 await asyncio.sleep(random.uniform(5, 10))
         return None
@@ -338,13 +338,10 @@ class NFTMonitor:
                             'price': getattr(gift, 'price', None), 'owner_id': getattr(gift, 'owner_id', None),
                             'listing_id': listing_id,
                         }
-                        
                         self.seen_listings.add(listing_id)
                         self.listing_timestamps[listing_id] = datetime.now()
-                        
                         if not self.is_bootstrapping:
                             self.alert_queue.put_nowait(listing_data)
-                
                 return []
             except Exception as e:
                 logger.debug(f"Ошибка загрузки {gift_name}: {e}")
@@ -374,11 +371,14 @@ class NFTMonitor:
         random.shuffle(shuffled)
         semaphore = asyncio.Semaphore(2) 
         batch_size = 2
-        for i in range(0, len(shuffled), batch_size):
+        total = len(shuffled)
+        for i in range(0, total, batch_size):
             if not self.check_circuit_breaker(): break
-            tasks = [self.fetch_and_process_listing(client, g['id'], g['title'], semaphore) for g in shuffled[i:i+batch_size]]
+            batch = shuffled[i:i+batch_size]
+            logger.info(f"  > [{i+len(batch)}/{total}] Сканирование: {', '.join(g['title'] for g in batch)}")
+            tasks = [self.fetch_and_process_listing(client, g['id'], g['title'], semaphore) for g in batch]
             await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.sleep(random.uniform(2.0, 4.0))
+            await asyncio.sleep(random.uniform(1.0, 2.0))
 
     async def run(self):
         logger.info("=" * 60)
@@ -397,7 +397,7 @@ class NFTMonitor:
             gifts = await self.get_available_gifts(self.client)
             if not gifts: return
             
-            logger.info("🔍 Начальное сканирование (без алертов)...")
+            logger.info(f"🔍 Начальное сканирование (0/{len(gifts)} категорий)...")
             self.is_bootstrapping = True
             await self.scan_all_gifts(self.client, gifts)
             self.is_bootstrapping = False
@@ -407,7 +407,7 @@ class NFTMonitor:
                 if not await self.ensure_connected(self.client):
                     await asyncio.sleep(30); continue
                 self.stats['scans'] += 1
-                logger.info(f"СКАН #{self.stats['scans']} (Всего алертов: {self.stats['alerts']})")
+                logger.info(f"СКАН #{self.stats['scans']} (Алертов: {self.stats['alerts']})")
                 await self.scan_all_gifts(self.client, gifts)
                 self.save_stats(); self.save_taken_users()
                 await asyncio.sleep(random.randint(*self.get_adaptive_delay()))
