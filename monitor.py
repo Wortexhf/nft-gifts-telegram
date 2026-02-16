@@ -28,7 +28,8 @@ BOT_SESSION_PATH = config.DATA_DIR / "bot_session"
 class NFTMonitor:
     def __init__(self):
         self.seen_listings: Set[str] = set()
-        self.seen_authors: Set[int] = set() # Session unique authors
+        self.seen_authors: Set[int] = set() 
+        self.author_lock = asyncio.Lock()
         self.listing_timestamps: Dict[str, datetime] = {}
         self.owner_cache: Dict[int, Tuple[Optional[dict], datetime]] = {}
         self.banned_users: Set[int] = set()
@@ -93,10 +94,7 @@ class NFTMonitor:
             if config.STATS_FILE.exists():
                 with open(config.STATS_FILE, 'r', encoding='utf-8') as f:
                     loaded = json.load(f)
-                    for key in ['scans', 'alerts', 'total_listings_found']:
-                        if key in loaded: self.stats[key] = loaded[key]
-                    if 'unique_gifts_seen' in loaded:
-                        self.stats['unique_gifts_seen'] = set(loaded['unique_gifts_seen'])
+                    if 'scans' in loaded: self.stats['scans'] = loaded['scans']
                     logger.info("✓ Статистика завантажена")
         except: pass
 
@@ -122,7 +120,6 @@ class NFTMonitor:
             uid = int(data.split("_")[1])
             self.banned_users.add(uid)
             self.save_banned_users()
-            logger.info(f"🚫 Користувача {uid} забанено")
             await event.answer("🚫 Користувача заблоковано!", alert=True)
             msg = await event.get_message()
             await msg.edit(msg.text + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**", buttons=None, link_preview=True)
@@ -141,7 +138,6 @@ class NFTMonitor:
 
             self.taken_users[uid_str] = clicker_name
             self.save_taken_users()
-            logger.info(f"🔒 Взято в роботу: {uid_str} користувачем {clicker_name}")
             await event.answer(f"✅ Ви взяли цього продавця!")
             
             msg = await event.get_message()
@@ -155,31 +151,23 @@ class NFTMonitor:
             data = event.data.decode()
             if not data.startswith("prof_"): return
             uid = int(data.split("_")[1])
-            logger.info(f"🔗 Запит профілю для {uid}")
             
             user_data = self.owner_cache.get(uid, (None, None))[0]
             name = user_data['name'] if user_data else "Продавець"
-            
-            # Using Markdown Mention - most reliable way for ID-based links
             u_link = f"tg://user?id={uid}"
-            if user_data and user_data.get('username'):
-                u_link = f"https://t.me/{user_data['username']}"
             
-            mention_link = f"[{name}]({u_link})"
+            # Replicate zrazok exactly: link in PM with HTML for maximum compatibility
+            msg_html = f"👤 Продавець: <a href=\"{u_link}\">{name}</a>\nID: <code>{uid}</code>"
             
             try:
-                await self.bot_client.send_message(
-                    event.sender_id, 
-                    f"👤 Продавець: **{mention_link}**\n\n_Натисніть на ім'я вище, щоб відкрити профіль._",
-                    parse_mode='Markdown'
-                )
+                await self.bot_client.send_message(event.sender_id, msg_html, parse_mode='html')
                 await event.answer("✅ Посилання надіслано в ЛС!", alert=False)
             except:
-                await event.answer("❌ Спочатку натисніть Start у ЛС бота!", alert=True)
+                await event.answer("❌ Будь ласка, натисніть Start у самому боті!", alert=True)
         except Exception as e: logger.error(f"Prof error: {e}")
 
     async def handle_start(self, event):
-        await event.respond("👋 **Бот активований!**\nТепер я зможу надсилати вам посилання на профілі продавців.")
+        await event.respond("👋 **Бот активований!**\nТепер я зможу надсилати вам посилання на продавців.")
 
     async def check_owner(self, owner_id) -> Optional[dict]:
         uid = owner_id.user_id if hasattr(owner_id, 'user_id') else owner_id if isinstance(owner_id, int) else None
@@ -217,13 +205,13 @@ class NFTMonitor:
                         self.listing_timestamps[listing_id] = datetime.now()
                         
                         if uid:
-                            # Populate seen_authors during bootstrapping to avoid duplicates later
-                            if self.is_bootstrapping:
-                                self.seen_authors.add(uid)
-                            elif uid not in self.seen_authors:
-                                self.seen_authors.add(uid)
-                                self.current_scan_found += 1
-                                asyncio.create_task(self.immediate_alert(gift, gift_name, uid))
+                            async with self.author_lock:
+                                if self.is_bootstrapping:
+                                    self.seen_authors.add(uid)
+                                elif uid not in self.seen_authors:
+                                    self.seen_authors.add(uid)
+                                    self.current_scan_found += 1
+                                    asyncio.create_task(self.immediate_alert(gift, gift_name, uid))
             except: pass
 
     async def immediate_alert(self, gift, gift_name, uid):
@@ -239,7 +227,7 @@ class NFTMonitor:
             if not user_data or uid in self.banned_users:
                 await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id]); return
 
-            # Button Logic: URL for username, Callback for ID
+            # SMART BUTTON: Link for username, Callback for ID
             if user_data.get('username'):
                 p_btn = Button.url("🔗 Профіль", f"https://t.me/{user_data['username']}")
             else:
@@ -270,7 +258,7 @@ class NFTMonitor:
             await self.client.start(); await self.bot_client.start(bot_token=config.BOT_TOKEN)
             self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=re.compile(b"ban_.*")))
             self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=re.compile(b"take_.*")))
-            self.bot_client.add_event_handler(self.handle_prof_callback, events.CallbackQuery(pattern=re.compile(b"prof_.*")))
+            self.bot_client.add_event_handler(self.handle_prof_callback, events.CallbackQuery(pattern=re.compile(re.compile(b"prof_.*"))))
             self.bot_client.add_event_handler(self.handle_start, events.NewMessage(pattern='/start'))
             
             gifts = [{'id': g.id, 'title': g.title} for g in (await self.client(GetStarGiftsRequest(hash=0))).gifts if g.title in config.TARGET_GIFT_NAMES]
