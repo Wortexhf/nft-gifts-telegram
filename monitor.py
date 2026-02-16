@@ -374,8 +374,11 @@ class NFTMonitor:
             username = None
             if hasattr(user, 'username') and user.username:
                 username = f"@{user.username}"
-            elif hasattr(user, 'first_name') and user.first_name:
-                username = user.first_name
+            else:
+                first_name = getattr(user, 'first_name', 'Unknown') or 'Unknown'
+                # Escape markdown characters in name just in case
+                first_name = first_name.replace('[', '').replace(']', '')
+                username = f"[{first_name}](tg://user?id={user.id})"
             
             self.owner_cache[user_id] = (username, datetime.now())
             return username
@@ -419,17 +422,23 @@ class NFTMonitor:
                 if not result or not hasattr(result, 'gifts'):
                     return []
 
-                listings = [
-                    {
-                        'title': gift_name,
-                        'slug': gift.slug,
-                        'number': gift.num,
-                        'owner_id': getattr(gift, 'owner_id', None),
-                        'listing_id': f"{gift.slug}-{gift.num}",
-                    }
-                    for gift in result.gifts
-                    if hasattr(gift, 'num') and hasattr(gift, 'slug')
-                ]
+                listings = []
+                for gift in result.gifts:
+                    if hasattr(gift, 'num') and hasattr(gift, 'slug'):
+                        # Try to get price
+                        price = getattr(gift, 'price', None)
+                        
+                        # Include price in ID to detect price changes if needed
+                        price_suffix = f"-{price}" if price is not None else ""
+                        
+                        listings.append({
+                            'title': gift_name,
+                            'slug': gift.slug,
+                            'number': gift.num,
+                            'price': price,
+                            'owner_id': getattr(gift, 'owner_id', None),
+                            'listing_id': f"{gift.slug}-{gift.num}",
+                        })
                 
                 self.stats['total_listings_found'] += len(listings)
                 self.stats['unique_gifts_seen'].add(gift_name)
@@ -451,20 +460,25 @@ class NFTMonitor:
         shuffled = gifts.copy()
         random.shuffle(shuffled)
         
-        logger.info(f"🔍 Сканируем {len(shuffled)} подарков")
+        total_gifts = len(shuffled)
+        logger.info(f"🔍 Сканируем {total_gifts} подарков")
         
         semaphore = asyncio.Semaphore(config.CONCURRENT_REQUESTS)
         all_listings = []
         
-        batch_size = 1 if self.get_error_rate() > 0.1 else 2
+        batch_size = 1 if self.get_error_rate() > 0.1 else 3
         
-        for i in range(0, len(shuffled), batch_size):
+        for i in range(0, total_gifts, batch_size):
             if not self.check_circuit_breaker():
                 logger.warning("⏸ Автостоп, пропуск батча")
                 await asyncio.sleep(15)
                 continue
             
             batch = shuffled[i:i+batch_size]
+            
+            # Log progress
+            logger.info(f"⏳ Батч {i//batch_size + 1}/{(total_gifts + batch_size - 1)//batch_size} ({len(batch)} шт: {', '.join(g['title'] for g in batch)})")
+
             tasks = [self.fetch_fresh_listings(client, g['id'], g['title'], semaphore) for g in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
@@ -472,7 +486,7 @@ class NFTMonitor:
                 if isinstance(result, list):
                     all_listings.extend(result)
             
-            if i + batch_size < len(shuffled):
+            if i + batch_size < total_gifts:
                 delay = random.uniform(config.BATCH_DELAY_MIN, config.BATCH_DELAY_MAX)
                 if self.get_error_rate() > 0.15:
                     delay *= 1.5
@@ -505,7 +519,14 @@ class NFTMonitor:
                         return
                     
                     link = f"https://t.me/nft/{listing['slug']}-{listing['number']}"
-                    msg = f"**{listing['title']}** `#{listing['number']}`\n👤 {owner}\n{link}"
+                    
+                    price_text = ""
+                    if listing.get('price'):
+                         # Try to fetch amount from price object if it's complex, otherwise use directly
+                         amount = getattr(listing['price'], 'amount', listing['price'])
+                         price_text = f"\n💰 {amount} ⭐️"
+
+                    msg = f"**{listing['title']}** `#{listing['number']}`{price_text}\n👤 {owner}\n{link}"
                     
                     await asyncio.sleep(random.uniform(1.5, 3.5))
                     
@@ -525,6 +546,7 @@ class NFTMonitor:
                         'title': listing['title'],
                         'slug': listing['slug'],
                         'number': listing['number'],
+                        'price': str(listing.get('price')),
                         'listing_id': listing['listing_id'],
                         'owner': owner,
                         'link': link
