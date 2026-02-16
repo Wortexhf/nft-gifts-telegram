@@ -460,20 +460,25 @@ class NFTMonitor:
         shuffled = gifts.copy()
         random.shuffle(shuffled)
         
-        logger.info(f"🔍 Сканируем {len(shuffled)} подарков")
+        total_gifts = len(shuffled)
+        logger.info(f"🔍 Сканируем {total_gifts} подарков")
         
         semaphore = asyncio.Semaphore(config.CONCURRENT_REQUESTS)
         all_listings = []
         
-        batch_size = 1 if self.get_error_rate() > 0.1 else 2
+        batch_size = 1 if self.get_error_rate() > 0.1 else 3
         
-        for i in range(0, len(shuffled), batch_size):
+        for i in range(0, total_gifts, batch_size):
             if not self.check_circuit_breaker():
                 logger.warning("⏸ Автостоп, пропуск батча")
                 await asyncio.sleep(15)
                 continue
             
             batch = shuffled[i:i+batch_size]
+            
+            # Log progress
+            logger.info(f"⏳ Батч {i//batch_size + 1}/{(total_gifts + batch_size - 1)//batch_size} ({len(batch)} шт: {', '.join(g['title'] for g in batch)})")
+
             tasks = [self.fetch_fresh_listings(client, g['id'], g['title'], semaphore) for g in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
@@ -481,7 +486,7 @@ class NFTMonitor:
                 if isinstance(result, list):
                     all_listings.extend(result)
             
-            if i + batch_size < len(shuffled):
+            if i + batch_size < total_gifts:
                 delay = random.uniform(config.BATCH_DELAY_MIN, config.BATCH_DELAY_MAX)
                 if self.get_error_rate() > 0.15:
                     delay *= 1.5
