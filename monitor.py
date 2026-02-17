@@ -161,6 +161,7 @@ class NFTMonitor:
 
             self.taken_users[uid_str] = clicker_name
             self.save_taken_users()
+            logger.info(f"✅ Продавец {uid_str} взят в работу пользователем {clicker_name}.")
             await event.answer(f"✅ Вы взяли этого продавца!")
             
             msg = await event.get_message()
