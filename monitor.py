@@ -159,7 +159,7 @@ class NFTMonitor:
             if status_btn: new_buttons.append([status_btn])
             new_buttons.append([Button.inline("🚫 Забанен", data=b"already_banned")])
             
-            clean_text = re.sub(r'\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**', '', msg.text).strip()
+            clean_text = re.sub(r'\n\n🚫 \*\*АВТОР ЗАБЛОКИРОВАН\*\*', '', msg.text).strip()
             final_text = clean_text + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**"
             
             # 3. Edit message and answer callback FIRST (for speed)
