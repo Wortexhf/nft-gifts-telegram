@@ -1,34 +1,6 @@
-import asyncio
-import random
-import traceback
-import sys
-import json
-import re
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional, Set
-from collections import deque
-
-from telethon import TelegramClient, events, types, functions
-from telethon.tl.custom import Button
-from telethon.errors import (
-    FloodWaitError, BadRequestError, RPCError, NetworkMigrateError, 
-    PhoneMigrateError, TimedOutError, AuthKeyError
-)
-from telethon.tl.functions.payments import GetResaleStarGiftsRequest, GetStarGiftsRequest
-from telethon.tl.functions.updates import GetStateRequest
-from telethon.tl.functions.users import GetFullUserRequest
-
-import config
-from utils import logger
-
-BANNED_USERS_FILE = config.DATA_DIR / "banned_users.json"
-TAKEN_USERS_FILE = config.DATA_DIR / "taken_users.json"
-BOT_SESSION_PATH = config.DATA_DIR / "bot_session"
-
-class NFTMonitor:
     def __init__(self):
         self.seen_listings: Set[str] = set()
-        self.seen_authors: Set[int] = set() 
+        self.seen_authors: Dict[int, datetime] = {} 
         self.author_lock = asyncio.Lock()
         self.listing_timestamps: Dict[str, datetime] = {}
         self.owner_cache: Dict[int, Tuple[Optional[dict], datetime]] = {}
@@ -41,6 +13,7 @@ class NFTMonitor:
         self.health_status = {"connected": True, "last_success": datetime.now(), "error_rate": 0.0}
         self.start_time = datetime.now()
         self.last_catalog_update = datetime.now() - timedelta(hours=1)
+        self.last_cleanup = datetime.now()
         self.gifts = []
         
         self.is_bootstrapping = True 
@@ -62,6 +35,25 @@ class NFTMonitor:
             connection_retries=5, retry_delay=8, auto_reconnect=True, timeout=60
         )
         self.bot_client = TelegramClient(str(BOT_SESSION_PATH), config.API_ID, config.API_HASH)
+
+    def cleanup_memory(self):
+        try:
+            now = datetime.now()
+            cutoff_listings = now - timedelta(hours=config.LISTING_MEMORY_HOURS)
+            to_remove_listings = [lid for lid, ts in self.listing_timestamps.items() if ts < cutoff_listings]
+            for lid in to_remove_listings:
+                self.seen_listings.discard(lid)
+                del self.listing_timestamps[lid]
+            
+            cutoff_authors = now - timedelta(hours=24)
+            to_remove_authors = [uid for uid, ts in self.seen_authors.items() if ts < cutoff_authors]
+            for uid in to_remove_authors:
+                del self.seen_authors[uid]
+                
+            if to_remove_listings or to_remove_authors:
+                logger.info(f"🧹 Очищення пам'яті: -{len(to_remove_listings)} лотів, -{len(to_remove_authors)} авторів")
+            self.last_cleanup = now
+        except: pass
 
     def load_banned_users(self):
         try:
@@ -203,11 +195,23 @@ class NFTMonitor:
         except:
             self.owner_cache[uid] = (None, datetime.now()); return None
 
-    async def update_catalog(self):
+    async def update_catalog(self, quiet=False):
         try:
             logger.info("📡 Оновлення каталогу подарунків...")
             res = await self.client(GetStarGiftsRequest(hash=0))
-            self.gifts = [{'id': g.id, 'title': g.title} for g in res.gifts if g.title in config.TARGET_GIFT_NAMES]
+            new_gifts = [{'id': g.id, 'title': g.title} for g in res.gifts if g.title in config.TARGET_GIFT_NAMES]
+            
+            if self.gifts and not quiet:
+                existing_ids = {g['id'] for g in self.gifts}
+                for g in new_gifts:
+                    if g['id'] not in existing_ids:
+                        logger.info(f"🆕 Новий тип NFT: {g['title']}. Ініціалізація...")
+                        old_boot = self.is_bootstrapping
+                        self.is_bootstrapping = True
+                        await self.fetch_and_process(g['id'], g['title'], asyncio.Semaphore(1))
+                        self.is_bootstrapping = old_boot
+            
+            self.gifts = new_gifts
             self.last_catalog_update = datetime.now()
             return True
         except Exception as e:
@@ -228,7 +232,7 @@ class NFTMonitor:
                     if listing_id in self.seen_listings:
                         if not self.is_bootstrapping:
                             break 
-                        if uid: self.seen_authors.add(uid)
+                        if uid: self.seen_authors[uid] = datetime.now()
                         continue
                         
                     self.seen_listings.add(listing_id)
@@ -239,7 +243,7 @@ class NFTMonitor:
                             async with self.author_lock:
                                 if uid in self.seen_authors:
                                     continue
-                                self.seen_authors.add(uid)
+                                self.seen_authors[uid] = datetime.now()
                             
                             logger.info(f"🆕 Знайдено новий лот: {gift_name} #{gift.num}")
                             self.current_scan_found += 1
@@ -247,7 +251,7 @@ class NFTMonitor:
                         else:
                             logger.warning(f"⚠️ Лот {listing_id} не має owner_id")
                     else:
-                        if uid: self.seen_authors.add(uid)
+                        if uid: self.seen_authors[uid] = datetime.now()
             except FloodWaitError as e:
                 logger.warning(f"⚠️ FLOOD: Очікування {e.seconds}с для {gift_name}")
                 await asyncio.sleep(e.seconds + 1)
@@ -313,6 +317,34 @@ class NFTMonitor:
         
         duration = (datetime.now() - start_time).total_seconds()
         logger.info(f"🏁 Цикл завершено за {duration:.1f}с. Всього лістингів в базі: {len(self.seen_listings)}")
+        
+        if datetime.now() - self.last_cleanup > timedelta(hours=1):
+            self.cleanup_memory()
+
+    async def run(self):
+        logger.info("="*60 + "\nNFT MONITOR by wortexhf [ULTRA FAST]\n" + "="*60)
+        self.load_stats(); self.load_history(); self.load_banned_users(); self.load_taken_users()
+        try:
+            await self.client.start(); await self.bot_client.start(bot_token=config.BOT_TOKEN)
+            self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=re.compile(b"ban_.*")))
+            self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=re.compile(b"take_.*")))
+            self.bot_client.add_event_handler(self.handle_prof_callback, events.CallbackQuery(pattern=re.compile(b"prof_.*")))
+            self.bot_client.add_event_handler(self.handle_start, events.NewMessage(pattern='/start'))
+            
+            await self.update_catalog(quiet=True)
+            self.is_bootstrapping = True; await self.scan_all(self.gifts); self.is_bootstrapping = False
+            logger.info(f"✓ База готова: {len(self.seen_listings)} листингов.")
+            while True:
+                if datetime.now() - self.last_catalog_update > timedelta(minutes=30):
+                    await self.update_catalog()
+
+                self.stats['scans'] += 1; self.current_scan_found = 0
+                await self.scan_all(self.gifts)
+                if self.current_scan_found > 0: logger.info(f"🆕 Знайдено нових: {self.current_scan_found}")
+                self.save_stats(); self.save_taken_users()
+                await asyncio.sleep(random.randint(3, 7))
+        except Exception as e: logger.error(f"Критична помилка: {e}")
+        finally: await self.client.disconnect(); await self.bot_client.disconnect()
 
     async def run(self):
         logger.info("="*60 + "\nNFT MONITOR by wortexhf [ULTRA FAST]\n" + "="*60)
