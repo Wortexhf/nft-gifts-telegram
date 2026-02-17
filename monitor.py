@@ -142,6 +142,7 @@ class NFTMonitor:
             uid = int(data.split("_")[1])
             self.banned_users.add(uid)
             self.save_banned_users()
+            logger.info(f"🚫 Пользователь {uid} вручную добавлен в черный список.")
             await event.answer("🚫 Пользователь заблокирован!", alert=True)
             msg = await event.get_message()
             await msg.edit(msg.text + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**", buttons=None, link_preview=True)
