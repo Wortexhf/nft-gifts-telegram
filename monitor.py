@@ -449,9 +449,16 @@ class NFTMonitor:
             u_name = f"@{user_data['username']}" if user_data['username'] else user_data['name']
             u_mention = f"[{u_name}](tg://user?id={uid})"
             
+            # Формируем блок информации о пользователе
             u_info = f"👤 **Продавец:** {u_mention} `[{uid}]`\n"
             u_info += f"⭐ **Статус:** {'Премиум' if user_data['premium'] else 'Обычный'}\n"
-            if user_data['price']: u_info += f"💬 **Сообщения:** {user_data['price']} ⭐️"
+            
+            # Показываем цену сообщений только для Премиум пользователей
+            if user_data['premium']:
+                if user_data['price'] is not None:
+                    u_info += f"💬 **Платные сообщения:** {user_data['price']} ⭐️\n"
+                else:
+                    u_info += f"💬 **Сообщения:** Бесплатно\n"
 
             final_text = f"🎁 **Обнаружен новый подарок на маркете**\n\n{link}\n\n🎁 **{gift_name}** `#{gift.num}`\n{price_stars}\n\n{u_info}"
             
