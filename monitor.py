@@ -156,19 +156,35 @@ class NFTMonitor:
             sender = await event.get_sender()
             clicker_name = f"@{sender.username}" if sender.username else sender.first_name
             
+            msg = await event.get_message()
+            
             if uid_str in self.taken_users:
-                await event.answer(f"⚠️ Уже занято: {self.taken_users[uid_str]}", alert=True); return
+                # Если уже занято, просто обновляем кнопки, чтобы было видно кем
+                taken_by = self.taken_users[uid_str]
+                new_buttons = [
+                    [Button.inline(f"🔒 Занято: {taken_by}", data=b"already_taken")],
+                    [Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())]
+                ]
+                await msg.edit(buttons=new_buttons, link_preview=True)
+                await event.answer(f"⚠️ Уже занято: {taken_by}", alert=True); return
 
             self.taken_users[uid_str] = clicker_name
             self.save_taken_users()
             logger.info(f"✅ Продавец {uid_str} взят в работу пользователем {clicker_name}.")
             await event.answer(f"✅ Вы взяли этого продавца!")
             
-            msg = await event.get_message()
             clean_text = re.sub(r'\n\n🔒 **Взял:.*', '', msg.text).strip()
             new_text = clean_text + f"\n\n🔒 **Взял:** {clicker_name}"
-            await msg.edit(new_text, buttons=msg.buttons, link_preview=True)
-        except: pass
+            
+            # Заменяем кнопку на статусную
+            new_buttons = [
+                [Button.inline(f"🔒 Взял: {clicker_name}", data=b"already_taken")],
+                [Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())]
+            ]
+            
+            await msg.edit(new_text, buttons=new_buttons, link_preview=True)
+        except Exception as e:
+            logger.error(f"Ошибка в handle_take_callback: {e}")
 
     async def handle_prof_callback(self, event):
         try:
