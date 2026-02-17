@@ -23,7 +23,7 @@ from utils import logger
 
 BANNED_USERS_FILE = config.DATA_DIR / "banned_users.json"
 TAKEN_USERS_FILE = config.DATA_DIR / "taken_users.json"
-BOT_SESSION_PATH = config.DATA_DIR / "bot_session"
+BOT_SESSION_PATH = config.DATA_DIR / "bot_instance"
 
 class NFTMonitor:
     def __init__(self):
@@ -359,18 +359,11 @@ class NFTMonitor:
             
             # Verify and resolve GROUP_ID
             try:
-                dialogs = await self.bot_client.get_dialogs()
-                logger.info("📡 Доступные диалоги бота:")
-                group_found = False
-                for d in dialogs:
-                    logger.info(f"  - {d.name} (ID: {d.id})")
-                    if d.id == config.GROUP_ID:
-                        group_found = True
-                
-                if not group_found:
-                    logger.warning(f"⚠️ GROUP_ID {config.GROUP_ID} не найден в диалогах бота!")
+                entity = await self.bot_client.get_entity(config.GROUP_ID)
+                logger.info(f"📡 Бот подключен к: {getattr(entity, 'title', 'Чат')} (ID: {entity.id})")
             except Exception as de:
-                logger.error(f"Ошибка при получении диалогов: {de}")
+                logger.error(f"⚠️ Не удалось найти группу {config.GROUP_ID}: {de}")
+                logger.info("📡 Попробуйте добавить бота в группу и отправить сообщение /start")
 
             self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=re.compile(b"ban_.*")))
             self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=re.compile(b"take_.*")))
