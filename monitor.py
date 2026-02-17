@@ -223,23 +223,31 @@ class NFTMonitor:
                 if not res or not hasattr(res, 'gifts'): return
                 for gift in res.gifts:
                     listing_id = f"{gift.slug}-{gift.num}"
+                    uid = gift.owner_id.user_id if hasattr(gift, 'owner_id') and isinstance(gift.owner_id, types.PeerUser) else None
                     
                     if listing_id in self.seen_listings:
                         if not self.is_bootstrapping:
-                            break # Stop: we hit already seen listings, further items are older
+                            break 
+                        if uid: self.seen_authors.add(uid)
                         continue
                         
                     self.seen_listings.add(listing_id)
                     self.listing_timestamps[listing_id] = datetime.now()
                     
                     if not self.is_bootstrapping:
-                        uid = gift.owner_id.user_id if hasattr(gift, 'owner_id') and isinstance(gift.owner_id, types.PeerUser) else None
-                        logger.info(f"🆕 Знайдено новий лот: {gift_name} #{gift.num}")
                         if uid:
+                            async with self.author_lock:
+                                if uid in self.seen_authors:
+                                    continue
+                                self.seen_authors.add(uid)
+                            
+                            logger.info(f"🆕 Знайдено новий лот: {gift_name} #{gift.num}")
                             self.current_scan_found += 1
                             asyncio.create_task(self.immediate_alert(gift, gift_name, uid))
                         else:
                             logger.warning(f"⚠️ Лот {listing_id} не має owner_id")
+                    else:
+                        if uid: self.seen_authors.add(uid)
             except FloodWaitError as e:
                 logger.warning(f"⚠️ FLOOD: Очікування {e.seconds}с для {gift_name}")
                 await asyncio.sleep(e.seconds + 1)
