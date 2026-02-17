@@ -142,10 +142,8 @@ class NFTMonitor:
             if not data.startswith("ban_"): return
             uid = int(data.split("_")[1])
             
-            # 1. Update memory state immediately
             self.banned_users.add(uid)
             
-            # 2. Prepare UI update
             msg = await event.get_message()
             status_btn = None
             if msg.buttons:
@@ -157,20 +155,56 @@ class NFTMonitor:
             
             new_buttons = []
             if status_btn: new_buttons.append([status_btn])
-            new_buttons.append([Button.inline("🚫 Забанен", data=b"already_banned")])
+            new_buttons.append([Button.inline("✅ Разблокировать", data=f"unban_{uid}".encode())])
             
             clean_text = re.sub(r'\n\n🚫 \*\*АВТОР ЗАБЛОКИРОВАН\*\*', '', msg.text).strip()
             final_text = clean_text + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**"
             
-            # 3. Edit message and answer callback FIRST (for speed)
             await event.edit(final_text, buttons=new_buttons, link_preview=True)
             await event.answer("🚫 Пользователь заблокирован!", alert=True)
             
-            # 4. Save to disk and log AFTER UI update
             self.save_banned_users()
             logger.info(f"🚫 Пользователь {uid} вручную добавлен в черный список.")
         except Exception as e:
             logger.error(f"Ошибка в handle_ban_callback: {e}")
+
+    async def handle_unban_callback(self, event):
+        try:
+            data = event.data.decode()
+            if not data.startswith("unban_"): return
+            uid = int(data.split("_")[1])
+            
+            self.banned_users.discard(uid)
+            
+            msg = await event.get_message()
+            status_btn = None
+            if msg.buttons:
+                for row in msg.buttons:
+                    for btn in row:
+                        if btn.data and b"already_taken" in btn.data:
+                            status_btn = btn
+                            break
+            
+            new_buttons = []
+            if status_btn:
+                new_buttons.append([status_btn])
+            else:
+                new_buttons.append([Button.inline("👤 Взять в работу", data=f"take_{uid}".encode())])
+            
+            new_buttons.append([Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())])
+            
+            clean_text = re.sub(r'\n\n🚫 \*\*АВТОР ЗАБЛОКИРОВАН\*\*', '', msg.text).strip()
+            
+            await event.edit(clean_text, buttons=new_buttons, link_preview=True)
+            await event.answer("✅ Пользователь разблокирован!", alert=True)
+            
+            self.save_banned_users()
+            logger.info(f"✅ Пользователь {uid} удален из черного списка.")
+        except Exception as e:
+            logger.error(f"Ошибка в handle_unban_callback: {e}")
+
+    async def handle_status_callback(self, event):
+        await event.answer("🔒 Этот лот уже взят в работу кем-то из участников.", alert=True)
 
     async def handle_take_callback(self, event):
         try:
@@ -184,29 +218,32 @@ class NFTMonitor:
             
             if uid_str in self.taken_users:
                 taken_by = self.taken_users[uid_str]
+                is_banned = int(uid_str) in self.banned_users
+                ban_btn = Button.inline("✅ Разблокировать", data=f"unban_{uid_str}".encode()) if is_banned else Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())
+                
                 new_buttons = [
                     [Button.inline(f"🔒 Занято: {taken_by}", data=b"already_taken")],
-                    [Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())]
+                    [ban_btn]
                 ]
                 await event.edit(buttons=new_buttons, link_preview=True)
                 await event.answer(f"⚠️ Уже занято: {taken_by}", alert=True); return
 
-            # 1. Update memory state immediately
             self.taken_users[uid_str] = clicker_name
             
-            # 2. Prepare UI update
             clean_text = re.sub(r'\n\n🔒 \*\*Взял:.*\*\*', '', msg.text).strip()
             new_text = clean_text + f"\n\n🔒 **Взял:** {clicker_name}"
+            
+            is_banned = int(uid_str) in self.banned_users
+            ban_btn = Button.inline("✅ Разблокировать", data=f"unban_{uid_str}".encode()) if is_banned else Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())
+
             new_buttons = [
                 [Button.inline(f"🔒 Взял: {clicker_name}", data=b"already_taken")],
-                [Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())]
+                [ban_btn]
             ]
             
-            # 3. Edit message and answer FIRST
             await event.edit(new_text, buttons=new_buttons, link_preview=True)
             await event.answer(f"✅ Вы взяли этого продавца!")
             
-            # 4. Save and log AFTER UI update
             self.save_taken_users()
             logger.info(f"✅ Продавец {uid_str} взят в работу пользователем {clicker_name}.")
         except Exception as e:
@@ -436,7 +473,9 @@ class NFTMonitor:
                 logger.info("📡 Попробуйте добавить бота в группу и отправить сообщение /start")
 
             self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=re.compile(b"ban_.*")))
+            self.bot_client.add_event_handler(self.handle_unban_callback, events.CallbackQuery(pattern=re.compile(b"unban_.*")))
             self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=re.compile(b"take_.*")))
+            self.bot_client.add_event_handler(self.handle_status_callback, events.CallbackQuery(pattern=re.compile(b"already_taken")))
             self.bot_client.add_event_handler(self.handle_prof_callback, events.CallbackQuery(pattern=re.compile(b"prof_.*")))
             self.bot_client.add_event_handler(self.handle_start, events.NewMessage(pattern='/start'))
             
