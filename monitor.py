@@ -309,12 +309,10 @@ class NFTMonitor:
             try:
                 target_group = await self.bot_client.get_input_entity(config.GROUP_ID)
             except Exception as e:
-                # If ID fails and isn't -100 prepended, try that
                 if isinstance(config.GROUP_ID, int) and str(config.GROUP_ID).startswith("-") and not str(config.GROUP_ID).startswith("-100"):
                     try:
                         alt_id = int("-100" + str(config.GROUP_ID).lstrip("-"))
                         target_group = await self.bot_client.get_input_entity(alt_id)
-                        logger.debug(f"ℹ️ Используем альтернативный ID группы: {alt_id}")
                     except: pass
 
             sent_msg = await self.bot_client.send_message(target_group, msg_text, link_preview=True)
@@ -326,20 +324,19 @@ class NFTMonitor:
                 await self.bot_client.delete_messages(target_group, [sent_msg.id]); return
 
             u_name = f"@{user_data['username']}" if user_data['username'] else user_data['name']
-            u_info = f"👤 **Пользователь:** {u_name} `[{uid}]`\n"
+            
+            # Use tg://user?id=... format which is more reliable, especially without username
+            u_link = f"tg://user?id={uid}"
+            u_mention = f"[{u_name}]({u_link})"
+            
+            u_info = f"👤 **Продавец:** {u_mention} `[{uid}]`\n"
             u_info += f"⭐ **Статус:** {'Premium' if user_data['premium'] else 'Обычный'}\n"
             if user_data['price']: 
                 u_info += f"💬 **Сообщения:** {user_data['price']} ⭐️"
 
             final_text = f"🎁 **Обнаружен новый подарок на маркете**\n\n{link}\n\n🎁 **{gift_name}** `#{gift.num}`\n{price_stars}\n\n{u_info}"
             
-            if user_data.get('username'):
-                p_btn = Button.url("🔗 Профиль", f"https://t.me/{user_data['username']}")
-            else:
-                p_btn = Button.inline("🔗 Профиль", data=f"prof_{uid}".encode())
-
             btns = [
-                [p_btn],
                 [Button.inline("👤 Взять в работу", data=f"take_{uid}".encode()), 
                  Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]
             ]
