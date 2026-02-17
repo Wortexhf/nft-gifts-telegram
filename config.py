@@ -25,6 +25,7 @@ API_HASH = os.getenv('API_HASH')
 SESSION_NAME = str(SESSION_FILE.with_suffix(''))
 GROUP_ID = int(os.getenv('GROUP_ID'))
 GROUP_INVITE = os.getenv('GROUP_INVITE')
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 # Monitoring Config
 TARGET_GIFT_NAMES = [
