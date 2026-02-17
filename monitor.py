@@ -193,6 +193,11 @@ class NFTMonitor:
             if not isinstance(entity, types.User) or entity.bot:
                 self.owner_cache[uid] = (None, datetime.now()); return None
             
+            # Skip deleted or restricted accounts
+            if getattr(entity, 'deleted', False) or getattr(entity, 'restricted', False):
+                logger.info(f"🚫 Пропущен удаленный/ограниченный аккаунт: {uid}")
+                self.owner_cache[uid] = (None, datetime.now()); return None
+
             full = await self.client(GetFullUserRequest(entity))
             name = ((entity.first_name or "") + " " + (entity.last_name or "")).strip() or "Unknown"
             
@@ -201,8 +206,18 @@ class NFTMonitor:
             if hasattr(full.full_user, 'stars_rating') and full.full_user.stars_rating:
                 price = getattr(full.full_user.stars_rating, 'message_price', None)
 
-            if not entity.username and not entity.photo and not price:
+            # Strict Ghost check: no username, no photo, no price, no stars level
+            has_photo = entity.photo is not None
+            has_username = entity.username is not None
+            has_price = price is not None
+            
+            if not has_username and not has_photo and not has_price:
                 logger.info(f"👻 Пропущен Ghost-продавец: {uid} (нет фото/юзернейма/звезд)")
+                self.owner_cache[uid] = (None, datetime.now()); return None
+
+            # Additional check: if user is not contactable (no username and no message price)
+            if not has_username and not has_price:
+                logger.info(f"🔒 Пропущен закрытый профиль: {uid} (нет юзернейма и цены сообщений)")
                 self.owner_cache[uid] = (None, datetime.now()); return None
 
             data = {
@@ -214,7 +229,8 @@ class NFTMonitor:
             }
             self.owner_cache[uid] = (data, datetime.now())
             return data
-        except:
+        except Exception as e:
+            logger.debug(f"Ошибка проверки владельца {uid}: {e}")
             self.owner_cache[uid] = (None, datetime.now()); return None
 
     async def update_catalog(self, quiet=False):
