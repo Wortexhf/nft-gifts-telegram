@@ -1,3 +1,31 @@
+import asyncio
+import random
+import traceback
+import sys
+import json
+import re
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Optional, Set
+from collections import deque
+
+from telethon import TelegramClient, events, types, functions
+from telethon.tl.custom import Button
+from telethon.errors import (
+    FloodWaitError, BadRequestError, RPCError, NetworkMigrateError, 
+    PhoneMigrateError, TimedOutError, AuthKeyError
+)
+from telethon.tl.functions.payments import GetResaleStarGiftsRequest, GetStarGiftsRequest
+from telethon.tl.functions.updates import GetStateRequest
+from telethon.tl.functions.users import GetFullUserRequest
+
+import config
+from utils import logger
+
+BANNED_USERS_FILE = config.DATA_DIR / "banned_users.json"
+TAKEN_USERS_FILE = config.DATA_DIR / "taken_users.json"
+BOT_SESSION_PATH = config.DATA_DIR / "bot_session"
+
+class NFTMonitor:
     def __init__(self):
         self.seen_listings: Set[str] = set()
         self.seen_authors: Dict[int, datetime] = {} 
@@ -332,31 +360,6 @@
             self.bot_client.add_event_handler(self.handle_start, events.NewMessage(pattern='/start'))
             
             await self.update_catalog(quiet=True)
-            self.is_bootstrapping = True; await self.scan_all(self.gifts); self.is_bootstrapping = False
-            logger.info(f"✓ База готова: {len(self.seen_listings)} листингов.")
-            while True:
-                if datetime.now() - self.last_catalog_update > timedelta(minutes=30):
-                    await self.update_catalog()
-
-                self.stats['scans'] += 1; self.current_scan_found = 0
-                await self.scan_all(self.gifts)
-                if self.current_scan_found > 0: logger.info(f"🆕 Знайдено нових: {self.current_scan_found}")
-                self.save_stats(); self.save_taken_users()
-                await asyncio.sleep(random.randint(3, 7))
-        except Exception as e: logger.error(f"Критична помилка: {e}")
-        finally: await self.client.disconnect(); await self.bot_client.disconnect()
-
-    async def run(self):
-        logger.info("="*60 + "\nNFT MONITOR by wortexhf [ULTRA FAST]\n" + "="*60)
-        self.load_stats(); self.load_history(); self.load_banned_users(); self.load_taken_users()
-        try:
-            await self.client.start(); await self.bot_client.start(bot_token=config.BOT_TOKEN)
-            self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=re.compile(b"ban_.*")))
-            self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=re.compile(b"take_.*")))
-            self.bot_client.add_event_handler(self.handle_prof_callback, events.CallbackQuery(pattern=re.compile(b"prof_.*")))
-            self.bot_client.add_event_handler(self.handle_start, events.NewMessage(pattern='/start'))
-            
-            await self.update_catalog()
             self.is_bootstrapping = True; await self.scan_all(self.gifts); self.is_bootstrapping = False
             logger.info(f"✓ База готова: {len(self.seen_listings)} листингов.")
             while True:
