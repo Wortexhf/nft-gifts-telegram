@@ -286,13 +286,20 @@ class NFTMonitor:
             price_stars = f"💰 {getattr(gift.price, 'amount', gift.price)} ⭐️" if hasattr(gift, 'price') and gift.price else ""
             
             msg_text = f"🎁 **Обнаружен новый подарок на маркете**\n\n{link}\n\n🎁 **{gift_name}** `#{gift.num}`\n{price_stars}\n\n👤 Поиск продавца..."
-            sent_msg = await self.bot_client.send_message(config.GROUP_ID, msg_text, link_preview=True)
+            
+            # Use cached or resolved entity for GROUP_ID
+            target_group = config.GROUP_ID
+            try:
+                target_group = await self.bot_client.get_input_entity(config.GROUP_ID)
+            except: pass
+
+            sent_msg = await self.bot_client.send_message(target_group, msg_text, link_preview=True)
             if not sent_msg: return
 
             user_data = await self.check_owner(uid)
             if not user_data or uid in self.banned_users:
                 logger.info(f"🚫 Пропущено (бан или нет данных): {uid}")
-                await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id]); return
+                await self.bot_client.delete_messages(target_group, [sent_msg.id]); return
 
             u_name = f"@{user_data['username']}" if user_data['username'] else user_data['name']
             u_info = f"👤 **Пользователь:** {u_name} `[{uid}]`\n"
@@ -319,7 +326,11 @@ class NFTMonitor:
         except Exception as e:
             logger.error(f"Ошибка алерта: {e}")
             if sent_msg:
-                try: await self.bot_client.delete_messages(config.GROUP_ID, [sent_msg.id])
+                try: 
+                    target_group = config.GROUP_ID
+                    try: target_group = await self.bot_client.get_input_entity(config.GROUP_ID)
+                    except: pass
+                    await self.bot_client.delete_messages(target_group, [sent_msg.id])
                 except: pass
 
     async def scan_all(self, gifts):
@@ -345,6 +356,22 @@ class NFTMonitor:
         self.load_stats(); self.load_history(); self.load_banned_users(); self.load_taken_users()
         try:
             await self.client.start(); await self.bot_client.start(bot_token=config.BOT_TOKEN)
+            
+            # Verify and resolve GROUP_ID
+            try:
+                dialogs = await self.bot_client.get_dialogs()
+                logger.info("📡 Доступные диалоги бота:")
+                group_found = False
+                for d in dialogs:
+                    logger.info(f"  - {d.name} (ID: {d.id})")
+                    if d.id == config.GROUP_ID:
+                        group_found = True
+                
+                if not group_found:
+                    logger.warning(f"⚠️ GROUP_ID {config.GROUP_ID} не найден в диалогах бота!")
+            except Exception as de:
+                logger.error(f"Ошибка при получении диалогов: {de}")
+
             self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=re.compile(b"ban_.*")))
             self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=re.compile(b"take_.*")))
             self.bot_client.add_event_handler(self.handle_prof_callback, events.CallbackQuery(pattern=re.compile(b"prof_.*")))
