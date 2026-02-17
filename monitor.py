@@ -172,20 +172,8 @@ class NFTMonitor:
         try:
             data = event.data.decode()
             if not data.startswith("prof_"): return
-            uid = int(data.split("_")[1])
-            
-            user_data = self.owner_cache.get(uid, (None, None))[0]
-            name = user_data['name'] if user_data else "Продавець"
-            u_link = f"tg://user?id={uid}"
-            
-            # Replicate zrazok exactly: link in PM with HTML for maximum compatibility
-            msg_html = f"👤 Продавець: <a href=\"{u_link}\">{name}</a>\nID: <code>{uid}</code>"
-            
-            try:
-                await self.bot_client.send_message(event.sender_id, msg_html, parse_mode='html')
-                await event.answer("✅ Посилання надіслано в ЛС!", alert=False)
-            except:
-                await event.answer("❌ Будь ласка, натисніть Start у самому боті!", alert=True)
+            # Show popup alert instead of sending PM
+            await event.answer("⚠️ Юзернейм відсутній. Зайдіть у профіль через вікно подарунку!", alert=True)
         except Exception as e: logger.error(f"Prof error: {e}")
 
     async def handle_start(self, event):
@@ -210,6 +198,12 @@ class NFTMonitor:
             price = None
             if hasattr(full.full_user, 'stars_rating') and full.full_user.stars_rating:
                 price = getattr(full.full_user.stars_rating, 'message_price', None)
+
+            # GHOST FILTER: Skip if no username, no photo and no stars message price
+            # This identifies inaccessible/hidden profiles
+            if not entity.username and not entity.photo and not price:
+                logger.info(f"👻 Пропущено Ghost-продавця: {uid} (немає фото/юзернейма/зірок)")
+                self.owner_cache[uid] = (None, datetime.now()); return None
 
             data = {
                 'id': uid, 
