@@ -18,14 +18,6 @@ load_dotenv(dotenv_path=ENV_PATH, override=True)
 DATA_DIR = SCRIPT_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-# Пути к файлам
-SESSION_FILE = DATA_DIR / "nft_gift_monitor.session"
-BOT_SESSION_PATH = DATA_DIR / "bot_instance"
-LOG_FILE = DATA_DIR / "monitor.log"
-STATS_FILE = DATA_DIR / "statistics.json"
-HISTORY_FILE = DATA_DIR / "listings_history.json"
-TOKEN_CACHE_FILE = DATA_DIR / "current_token.txt"
-
 # Проверка обязательных полей
 mandatory_fields = ['API_ID', 'API_HASH', 'BOT_TOKEN', 'GROUP_ID']
 missing = [f for f in mandatory_fields if not os.getenv(f)]
@@ -33,7 +25,7 @@ missing = [f for f in mandatory_fields if not os.getenv(f)]
 if missing:
     print("="*50)
     print(f"❌ КРИТИЧЕСКАЯ ОШИБКА В .env ФАЙЛЕ!")
-    print(f"Отсутствуют или закомментированы обязательные параметры: {', '.join(missing)}")
+    print(f"Отсутствуют или закомментированы параметры: {', '.join(missing)}")
     print("Пожалуйста, откройте .env и заполните их.")
     print("="*50)
     sys.exit(1)
@@ -45,19 +37,25 @@ BOT_TOKEN = os.getenv('BOT_TOKEN', '').strip('"\' ')
 GROUP_ID = int(os.getenv('GROUP_ID', 0))
 GROUP_INVITE = os.getenv('GROUP_INVITE')
 
-# ЛОГИКА СМЕНЫ БОТА: Если токен изменился, удаляем старую сессию бота
+# Пути к файлам сессий (используем строки для Telethon)
+SESSION_NAME = str(DATA_DIR / "nft_gift_monitor")
+BOT_SESSION_PATH = str(DATA_DIR / "bot_instance")
+LOG_FILE = DATA_DIR / "monitor.log"
+STATS_FILE = DATA_DIR / "statistics.json"
+HISTORY_FILE = DATA_DIR / "listings_history.json"
+TOKEN_CACHE_FILE = DATA_DIR / "current_token.txt"
+
+# ЛОГИКА СМЕНЫ БОТА: Очистка сессий при смене токена
 try:
     if TOKEN_CACHE_FILE.exists():
         old_token = TOKEN_CACHE_FILE.read_text().strip()
         if old_token != BOT_TOKEN:
-            print("🔄 Обнаружен новый токен бота. Сброс сессии...")
-            for f in DATA_DIR.glob("bot_instance*"):
+            print("🔄 Токен изменен. Очистка старых сессий...")
+            for f in DATA_DIR.glob("*.session*"):
                 try: f.unlink()
                 except: pass
     TOKEN_CACHE_FILE.write_text(BOT_TOKEN)
 except: pass
-
-SESSION_NAME = str(SESSION_FILE.with_suffix(''))
 
 # Конфигурация мониторинга
 default_gifts = [
@@ -77,29 +75,21 @@ if env_gifts:
 else:
     TARGET_GIFT_NAMES = default_gifts
 
-# === КОНФИГУРАЦИЯ АГРЕССИВНОГО РЕЖИМА ===
+# Настройки агрессивности
 BASE_SCAN_INTERVAL = (5, 10)
 CONCURRENT_REQUESTS = 5
 FETCH_LIMIT = 50
 CONCURRENT_ALERTS = 10
-
-# Кэширование
 LISTING_MEMORY_HOURS = 48
 OWNER_CACHE_TTL_HOURS = 12
 OWNER_CACHE_MAX_SIZE = 5000
-
-# Безопасность и повторы
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 30
 KEEPALIVE_INTERVAL = 240
-
-# Лимиты запросов
 MIN_REQUEST_DELAY = 0.5           
 MAX_REQUEST_DELAY = 1.5           
 BATCH_DELAY_MIN = 1.0             
 BATCH_DELAY_MAX = 3.0             
-
-# Предохранитель
 CIRCUIT_BREAKER_THRESHOLD = 5
 CIRCUIT_BREAKER_TIMEOUT = 60
 HEALTH_CHECK_INTERVAL = 15
