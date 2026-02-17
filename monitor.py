@@ -21,12 +21,14 @@ from telethon.tl.functions.users import GetFullUserRequest
 import config
 from utils import logger
 
+# Константы путей к файлам данных
 BANNED_USERS_FILE = config.DATA_DIR / "banned_users.json"
 TAKEN_USERS_FILE = config.DATA_DIR / "taken_users.json"
-BOT_SESSION_PATH = config.DATA_DIR / "bot_session"
+BOT_SESSION_PATH = config.DATA_DIR / "bot_instance"
 
 class NFTMonitor:
     def __init__(self):
+        # Инициализация хранилищ данных
         self.seen_listings: Set[str] = set()
         self.seen_authors: Dict[int, datetime] = {} 
         self.author_lock = asyncio.Lock()
@@ -47,6 +49,7 @@ class NFTMonitor:
         self.is_bootstrapping = True 
         self.current_scan_found = 0
         
+        # Сбор статистики
         self.stats = {
             'scans': 0, 'alerts': 0, 'errors': 0, 'skipped_no_owner': 0,
             'reconnects': 0, 'flood_waits': 0, 'circuit_breaks': 0,
@@ -58,6 +61,7 @@ class NFTMonitor:
         }
         self.listings_history = []
         
+        # Инициализация клиентов
         self.client = TelegramClient(
             config.SESSION_NAME, config.API_ID, config.API_HASH,
             connection_retries=5, retry_delay=8, auto_reconnect=True, timeout=60
@@ -65,6 +69,7 @@ class NFTMonitor:
         self.bot_client = TelegramClient(str(BOT_SESSION_PATH), config.API_ID, config.API_HASH)
 
     def cleanup_memory(self):
+        """Очистка старых данных из оперативной памяти"""
         try:
             now = datetime.now()
             cutoff_listings = now - timedelta(hours=config.LISTING_MEMORY_HOURS)
@@ -84,20 +89,26 @@ class NFTMonitor:
         except: pass
 
     def load_banned_users(self):
+        """Загрузка черного списка с принудительным преобразованием в int"""
         try:
             if BANNED_USERS_FILE.exists():
                 with open(BANNED_USERS_FILE, 'r', encoding='utf-8') as f:
-                    self.banned_users = set(json.load(f))
+                    data = json.load(f)
+                    # Принудительно конвертируем все ID в int, чтобы избежать ошибок сравнения
+                    self.banned_users = set(int(uid) for uid in data)
                 logger.info(f"✓ Загружено {len(self.banned_users)} забаненных")
-        except: pass
+        except Exception as e:
+            logger.error(f"Ошибка загрузки забаненных: {e}")
 
     def save_banned_users(self):
+        """Сохранение черного списка"""
         try:
             with open(BANNED_USERS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(list(self.banned_users), f)
         except: pass
 
     def load_taken_users(self):
+        """Загрузка активных задач"""
         try:
             if TAKEN_USERS_FILE.exists():
                 with open(TAKEN_USERS_FILE, 'r', encoding='utf-8') as f:
@@ -106,12 +117,14 @@ class NFTMonitor:
         except: pass
 
     def save_taken_users(self):
+        """Сохранение активных задач"""
         try:
             with open(TAKEN_USERS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.taken_users, f, ensure_ascii=False, indent=2)
         except: pass
 
     def load_stats(self):
+        """Загрузка статистики"""
         try:
             if config.STATS_FILE.exists():
                 with open(config.STATS_FILE, 'r', encoding='utf-8') as f:
@@ -121,6 +134,7 @@ class NFTMonitor:
         except: pass
 
     def save_stats(self):
+        """Сохранение статистики"""
         try:
             st = self.stats.copy()
             st['unique_gifts_seen'] = list(self.stats['unique_gifts_seen'])
@@ -129,6 +143,7 @@ class NFTMonitor:
         except: pass
 
     def load_history(self):
+        """Загрузка истории листингов"""
         try:
             if config.HISTORY_FILE.exists():
                 with open(config.HISTORY_FILE, 'r', encoding='utf-8') as f:
@@ -136,51 +151,176 @@ class NFTMonitor:
                 logger.info(f"✓ История загружена")
         except: pass
 
+    def _clean_msg_text(self, text):
+        """Очистка текста сообщения от системных статусов"""
+        if not text: return ""
+        text = re.sub(r'\n\n🚫 .*АВТОР ЗАБЛОКИРОВАН.*', '', text)
+        text = re.sub(r'\n\n🔒 .*Взял:.*', '', text)
+        return text.strip()
+
     async def handle_ban_callback(self, event):
+        """Обработка кнопки блокировки"""
         try:
             data = event.data.decode()
+            if not data.startswith("ban_"): return
             uid = int(data.split("_")[1])
+            
             self.banned_users.add(uid)
+            
+            msg = await event.get_message()
+            status_btn = None
+            if msg.buttons:
+                for row in msg.buttons:
+                    for btn in row:
+                        if btn.data and b"already_taken" in btn.data:
+                            status_btn = btn
+                            break
+            
+            new_buttons = []
+            if status_btn: new_buttons.append([status_btn])
+            new_buttons.append([Button.inline("✅ Разблокировать", data=f"unban_{uid}".encode())])
+            
+            final_text = self._clean_msg_text(msg.text) + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**"
+            
+            await event.edit(final_text, buttons=new_buttons, link_preview=True)
+            await event.answer("🚫 Пользователь заблокирован!", alert=True)
+            
             self.save_banned_users()
             logger.info(f"🚫 Пользователь {uid} вручную добавлен в черный список.")
-            await event.answer("🚫 Пользователь заблокирован!", alert=True)
+        except Exception as e:
+            logger.error(f"Ошибка в handle_ban_callback: {e}")
+
+    async def handle_unban_callback(self, event):
+        """Обработка кнопки разблокировки"""
+        try:
+            data = event.data.decode()
+            if not data.startswith("unban_"): return
+            uid = int(data.split("_")[1])
+            
+            self.banned_users.discard(uid)
+            
             msg = await event.get_message()
-            await msg.edit(msg.text + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**", buttons=None, link_preview=True)
-        except: pass
+            status_btn = None
+            if msg.buttons:
+                for row in msg.buttons:
+                    for btn in row:
+                        if btn.data and b"already_taken" in btn.data:
+                            status_btn = btn
+                            break
+            
+            new_buttons = []
+            if status_btn:
+                new_buttons.append([status_btn])
+            else:
+                new_buttons.append([Button.inline("👤 Взять в работу", data=f"take_{uid}".encode())])
+            
+            new_buttons.append([Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())])
+            
+            await event.edit(self._clean_msg_text(msg.text), buttons=new_buttons, link_preview=True)
+            await event.answer("✅ Пользователь разблокирован!", alert=True)
+            
+            self.save_banned_users()
+            logger.info(f"✅ Пользователь {uid} удален из черного списка.")
+        except Exception as e:
+            logger.error(f"Ошибка в handle_unban_callback: {e}")
+
+    async def handle_status_callback(self, event):
+        """Информационное окно для статусных кнопок"""
+        await event.answer("🔒 Этот лот уже взят в работу кем-то из участников.", alert=True)
 
     async def handle_take_callback(self, event):
+        """Обработка кнопки 'Взять в работу'"""
         try:
             data = event.data.decode()
             if not data.startswith("take_"): return
             uid_str = data.split("_")[1]
+            uid_int = int(uid_str)
             sender = await event.get_sender()
             clicker_name = f"@{sender.username}" if sender.username else sender.first_name
             
+            msg = await event.get_message()
+            
             if uid_str in self.taken_users:
-                await event.answer(f"⚠️ Уже занято: {self.taken_users[uid_str]}", alert=True); return
+                taken_by = self.taken_users[uid_str]
+                is_banned = uid_int in self.banned_users
+                ban_btn = Button.inline("✅ Разблокировать", data=f"unban_{uid_str}".encode()) if is_banned else Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())
+                
+                new_buttons = [[Button.inline(f"🔒 Занято: {taken_by}", data=b"already_taken")], [ban_btn]]
+                await event.edit(buttons=new_buttons, link_preview=True)
+                await event.answer(f"⚠️ Уже занято: {taken_by}", alert=True); return
 
             self.taken_users[uid_str] = clicker_name
-            self.save_taken_users()
-            logger.info(f"✅ Продавец {uid_str} взят в работу пользователем {clicker_name}.")
+            
+            is_banned = uid_int in self.banned_users
+            ban_btn = Button.inline("✅ Разблокировать", data=f"unban_{uid_str}".encode()) if is_banned else Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())
+
+            new_text = self._clean_msg_text(msg.text) + f"\n\n🔒 **Взял:** {clicker_name}"
+            new_buttons = [
+                [Button.inline(f"🔒 Взял: {clicker_name}", data=b"already_taken")],
+                [Button.inline("🛑 Прекратить работу", data=f"stop_{uid_str}".encode())],
+                [ban_btn]
+            ]
+            
+            await event.edit(new_text, buttons=new_buttons, link_preview=True)
             await event.answer(f"✅ Вы взяли этого продавца!")
             
+            self.save_taken_users()
+            logger.info(f"✅ Продавец {uid_str} взят в работу пользователем {clicker_name}.")
+        except Exception as e:
+            logger.error(f"Ошибка в handle_take_callback: {e}")
+
+    async def handle_stop_callback(self, event):
+        """Обработка кнопки 'Прекратить работу'"""
+        try:
+            data = event.data.decode()
+            if not data.startswith("stop_"): return
+            uid_str = data.split("_")[1]
+            uid_int = int(uid_str)
+            sender = await event.get_sender()
+            
+            if uid_str not in self.taken_users:
+                await event.answer("⚠️ Эта задача уже свободна.", alert=True); return
+            
+            taken_by = self.taken_users[uid_str]
+            clicker_name = f"@{sender.username}" if sender.username else sender.first_name
+            
+            if taken_by != clicker_name:
+                await event.answer(f"⚠️ Эту работу может прекратить только {taken_by}", alert=True); return
+
+            del self.taken_users[uid_str]
+            
             msg = await event.get_message()
-            clean_text = re.sub(r'\n\n🔒 **Взял:.*', '', msg.text).strip()
-            new_text = clean_text + f"\n\n🔒 **Взял:** {clicker_name}"
-            await msg.edit(new_text, buttons=msg.buttons, link_preview=True)
-        except: pass
+            is_banned = uid_int in self.banned_users
+            ban_btn = Button.inline("✅ Разблокировать", data=f"unban_{uid_str}".encode()) if is_banned else Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())
+            
+            new_buttons = [
+                [Button.inline("👤 Взять в работу", data=f"take_{uid_str}".encode())],
+                [ban_btn]
+            ]
+            
+            await event.edit(self._clean_msg_text(msg.text), buttons=new_buttons, link_preview=True)
+            await event.answer("🛑 Работа прекращена. Лот снова свободен!", alert=True)
+            
+            self.save_taken_users()
+            logger.info(f"🛑 Пользователь {clicker_name} прекратил работу с продавцом {uid_str}.")
+        except Exception as e:
+            logger.error(f"Ошибка в handle_stop_callback: {e}")
 
     async def handle_prof_callback(self, event):
+        """Обработка отсутствующего юзернейма"""
         try:
             data = event.data.decode()
             if not data.startswith("prof_"): return
             await event.answer("⚠️ Юзернейм отсутствует. Зайдите в профиль через окно подарка!", alert=True)
-        except Exception as e: logger.error(f"Prof error: {e}")
+        except Exception as e: logger.error(f"Ошибка профиля: {e}")
 
     async def handle_start(self, event):
-        await event.respond("👋 **Бот активирован!**\nТеперь я смогу присылать вам ссылки на продавцов.")
+        """Команда /start для получения ID чата"""
+        logger.info(f"📩 Получено сообщение /start. ID этого чата: {event.chat_id}")
+        await event.respond(f"👋 **Бот активирован!**\nID этого чата: `{event.chat_id}`\nСкопируйте его в .env, если сообщения не приходят.")
 
     async def check_owner(self, owner_id) -> Optional[dict]:
+        """Получение информации о владельце"""
         uid = owner_id.user_id if hasattr(owner_id, 'user_id') else owner_id if isinstance(owner_id, int) else None
         if not uid: return None
         if uid in self.owner_cache:
@@ -192,8 +332,11 @@ class NFTMonitor:
             if not isinstance(entity, types.User) or entity.bot:
                 self.owner_cache[uid] = (None, datetime.now()); return None
             
+            if getattr(entity, 'deleted', False) or getattr(entity, 'restricted', False):
+                self.owner_cache[uid] = (None, datetime.now()); return None
+
             full = await self.client(GetFullUserRequest(entity))
-            name = ((entity.first_name or "") + " " + (entity.last_name or "")).strip() or "Unknown"
+            name = ((entity.first_name or "") + " " + (entity.last_name or "")).strip() or "Неизвестно"
             
             premium = getattr(entity, 'premium', False)
             price = None
@@ -201,7 +344,9 @@ class NFTMonitor:
                 price = getattr(full.full_user.stars_rating, 'message_price', None)
 
             if not entity.username and not entity.photo and not price:
-                logger.info(f"👻 Пропущен Ghost-продавец: {uid} (нет фото/юзернейма/звезд)")
+                self.owner_cache[uid] = (None, datetime.now()); return None
+
+            if not entity.username and not price:
                 self.owner_cache[uid] = (None, datetime.now()); return None
 
             data = {
@@ -217,21 +362,11 @@ class NFTMonitor:
             self.owner_cache[uid] = (None, datetime.now()); return None
 
     async def update_catalog(self, quiet=False):
+        """Обновление типов подарков"""
         try:
             logger.info("📡 Обновление каталога подарков...")
             res = await self.client(GetStarGiftsRequest(hash=0))
             new_gifts = [{'id': g.id, 'title': g.title} for g in res.gifts if g.title in config.TARGET_GIFT_NAMES]
-            
-            if self.gifts and not quiet:
-                existing_ids = {g['id'] for g in self.gifts}
-                for g in new_gifts:
-                    if g['id'] not in existing_ids:
-                        logger.info(f"🆕 Новый тип NFT: {g['title']}. Инициализация...")
-                        old_boot = self.is_bootstrapping
-                        self.is_bootstrapping = True
-                        await self.fetch_and_process(g['id'], g['title'], asyncio.Semaphore(1))
-                        self.is_bootstrapping = old_boot
-            
             self.gifts = new_gifts
             self.last_catalog_update = datetime.now()
             return True
@@ -240,6 +375,7 @@ class NFTMonitor:
             return False
 
     async def fetch_and_process(self, gift_id, gift_name, semaphore):
+        """Процесс получения и обработки листингов"""
         async with semaphore:
             try:
                 res = await self.client(GetResaleStarGiftsRequest(
@@ -251,8 +387,7 @@ class NFTMonitor:
                     uid = gift.owner_id.user_id if hasattr(gift, 'owner_id') and isinstance(gift.owner_id, types.PeerUser) else None
                     
                     if listing_id in self.seen_listings:
-                        if not self.is_bootstrapping:
-                            break 
+                        if not self.is_bootstrapping: break 
                         if uid: self.seen_authors[uid] = datetime.now()
                         continue
                         
@@ -262,8 +397,7 @@ class NFTMonitor:
                     if not self.is_bootstrapping:
                         if uid:
                             async with self.author_lock:
-                                if uid in self.seen_authors:
-                                    continue
+                                if uid in self.seen_authors: continue
                                 self.seen_authors[uid] = datetime.now()
                             
                             logger.info(f"🆕 Найден новый лот: {gift_name} #{gift.num}")
@@ -280,6 +414,12 @@ class NFTMonitor:
                 logger.debug(f"Ошибка сканирования {gift_name}: {e}")
 
     async def immediate_alert(self, gift, gift_name, uid):
+        """Отправка уведомления"""
+        # 1. Жесткая проверка бана по ID (принудительно int)
+        if int(uid) in self.banned_users:
+            logger.info(f"🚫 Лот пропущен (автор {uid} в черном списке)")
+            return
+
         sent_msg = None
         try:
             link = f"https://t.me/nft/{gift.slug}-{gift.num}"
@@ -287,38 +427,36 @@ class NFTMonitor:
             
             msg_text = f"🎁 **Обнаружен новый подарок на маркете**\n\n{link}\n\n🎁 **{gift_name}** `#{gift.num}`\n{price_stars}\n\n👤 Поиск продавца..."
             
-            # Use cached or resolved entity for GROUP_ID
             target_group = config.GROUP_ID
             try:
                 target_group = await self.bot_client.get_input_entity(config.GROUP_ID)
-            except: pass
+            except:
+                if isinstance(config.GROUP_ID, int) and str(config.GROUP_ID).startswith("-") and not str(config.GROUP_ID).startswith("-100"):
+                    try: target_group = await self.bot_client.get_input_entity(int("-100" + str(config.GROUP_ID).lstrip("-")))
+                    except: pass
 
+            # Отправляем временное сообщение
             sent_msg = await self.bot_client.send_message(target_group, msg_text, link_preview=True)
             if not sent_msg: return
 
+            # 2. Получаем данные владельца и ЕЩЕ РАЗ проверяем бан
             user_data = await self.check_owner(uid)
-            if not user_data or uid in self.banned_users:
+            if not user_data or int(uid) in self.banned_users:
                 logger.info(f"🚫 Пропущено (бан или нет данных): {uid}")
-                await self.bot_client.delete_messages(target_group, [sent_msg.id]); return
+                await self.bot_client.delete_messages(target_group, [sent_msg.id])
+                return
 
             u_name = f"@{user_data['username']}" if user_data['username'] else user_data['name']
-            u_info = f"👤 **Пользователь:** {u_name} `[{uid}]`\n"
-            u_info += f"⭐ **Статус:** {'Premium' if user_data['premium'] else 'Обычный'}\n"
-            if user_data['price']: 
-                u_info += f"💬 **Сообщения:** {user_data['price']} ⭐️"
+            u_mention = f"[{u_name}](tg://user?id={uid})"
+            
+            u_info = f"👤 **Продавец:** {u_mention} `[{uid}]`\n"
+            u_info += f"⭐ **Статус:** {'Премиум' if user_data['premium'] else 'Обычный'}\n"
+            if user_data['price']: u_info += f"💬 **Сообщения:** {user_data['price']} ⭐️"
 
             final_text = f"🎁 **Обнаружен новый подарок на маркете**\n\n{link}\n\n🎁 **{gift_name}** `#{gift.num}`\n{price_stars}\n\n{u_info}"
             
-            if user_data.get('username'):
-                p_btn = Button.url("🔗 Профиль", f"https://t.me/{user_data['username']}")
-            else:
-                p_btn = Button.inline("🔗 Профиль", data=f"prof_{uid}".encode())
-
-            btns = [
-                [p_btn],
-                [Button.inline("👤 Взять в работу", data=f"take_{uid}".encode()), 
-                 Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]
-            ]
+            btns = [[Button.inline("👤 Взять в работу", data=f"take_{uid}".encode()), 
+                     Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]]
             
             await sent_msg.edit(final_text, buttons=btns, link_preview=True)
             logger.info(f"✅ Алерт отправлен: {gift_name} #{gift.num} для {u_name}")
@@ -326,14 +464,11 @@ class NFTMonitor:
         except Exception as e:
             logger.error(f"Ошибка алерта: {e}")
             if sent_msg:
-                try: 
-                    target_group = config.GROUP_ID
-                    try: target_group = await self.bot_client.get_input_entity(config.GROUP_ID)
-                    except: pass
-                    await self.bot_client.delete_messages(target_group, [sent_msg.id])
+                try: await self.bot_client.delete_messages(target_group, [sent_msg.id])
                 except: pass
 
     async def scan_all(self, gifts):
+        """Цикл сканирования"""
         random.shuffle(gifts)
         sem = asyncio.Semaphore(10); batch = 5 
         start_time = datetime.now()
@@ -341,39 +476,30 @@ class NFTMonitor:
             current_batch = gifts[i:i+batch]
             batch_titles = ", ".join([g['title'].split()[-1] for g in current_batch])
             logger.info(f"  > [{i+len(current_batch)}/{len(gifts)}] Сканирование: {batch_titles}...")
-            tasks = [self.fetch_and_process(g['id'], g['title'], sem) for g in current_batch]
+            tasks = [self.fetch_and_process(g['id'], g['title'], semaphore=sem) for g in current_batch]
+            # Исправлена ошибка: Semaphore передавался позиционно не туда
             await asyncio.gather(*tasks)
             await asyncio.sleep(random.uniform(0.3, 0.7))
         
-        duration = (datetime.now() - start_time).total_seconds()
-        logger.info(f"🏁 Цикл завершен за {duration:.1f}с. Всего листингов в базе: {len(self.seen_listings)}")
-        
-        if datetime.now() - self.last_cleanup > timedelta(hours=1):
-            self.cleanup_memory()
+        if datetime.now() - self.last_cleanup > timedelta(hours=1): self.cleanup_memory()
 
     async def run(self):
+        """Запуск монитора"""
         logger.info("="*60 + "\nNFT MONITOR by wortexhf [ULTRA FAST]\n" + "="*60)
         self.load_stats(); self.load_history(); self.load_banned_users(); self.load_taken_users()
         try:
             await self.client.start(); await self.bot_client.start(bot_token=config.BOT_TOKEN)
             
-            # Verify and resolve GROUP_ID
             try:
-                dialogs = await self.bot_client.get_dialogs()
-                logger.info("📡 Доступные диалоги бота:")
-                group_found = False
-                for d in dialogs:
-                    logger.info(f"  - {d.name} (ID: {d.id})")
-                    if d.id == config.GROUP_ID:
-                        group_found = True
-                
-                if not group_found:
-                    logger.warning(f"⚠️ GROUP_ID {config.GROUP_ID} не найден в диалогах бота!")
-            except Exception as de:
-                logger.error(f"Ошибка при получении диалогов: {de}")
+                entity = await self.bot_client.get_entity(config.GROUP_ID)
+                logger.info(f"📡 Бот подключен к: {getattr(entity, 'title', 'Чат')} (ID: {entity.id})")
+            except: pass
 
             self.bot_client.add_event_handler(self.handle_ban_callback, events.CallbackQuery(pattern=re.compile(b"ban_.*")))
+            self.bot_client.add_event_handler(self.handle_unban_callback, events.CallbackQuery(pattern=re.compile(b"unban_.*")))
             self.bot_client.add_event_handler(self.handle_take_callback, events.CallbackQuery(pattern=re.compile(b"take_.*")))
+            self.bot_client.add_event_handler(self.handle_stop_callback, events.CallbackQuery(pattern=re.compile(b"stop_.*")))
+            self.bot_client.add_event_handler(self.handle_status_callback, events.CallbackQuery(pattern=re.compile(b"already_taken")))
             self.bot_client.add_event_handler(self.handle_prof_callback, events.CallbackQuery(pattern=re.compile(b"prof_.*")))
             self.bot_client.add_event_handler(self.handle_start, events.NewMessage(pattern='/start'))
             
@@ -381,9 +507,7 @@ class NFTMonitor:
             self.is_bootstrapping = True; await self.scan_all(self.gifts); self.is_bootstrapping = False
             logger.info(f"✓ База готова: {len(self.seen_listings)} листингов.")
             while True:
-                if datetime.now() - self.last_catalog_update > timedelta(minutes=30):
-                    await self.update_catalog()
-
+                if datetime.now() - self.last_catalog_update > timedelta(minutes=30): await self.update_catalog()
                 self.stats['scans'] += 1; self.current_scan_found = 0
                 await self.scan_all(self.gifts)
                 if self.current_scan_found > 0: logger.info(f"🆕 Найдено новых: {self.current_scan_found}")

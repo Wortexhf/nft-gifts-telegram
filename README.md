@@ -1,1 +1,8 @@
-just enter your api of bot. install library's and its finish
+# Монитор NFT подарков Telegram
+
+Просто введите ваш API бота, установите библиотеки, и все готово к работе.
+
+## Установка
+1. Создайте файл `.env` на основе примера.
+2. Установите зависимости: `pip install -r requirements.txt`
+3. Запустите монитор: `python main.py`
