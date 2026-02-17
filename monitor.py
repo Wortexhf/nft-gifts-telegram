@@ -455,8 +455,11 @@ class NFTMonitor:
 
             final_text = f"🎁 **Обнаружен новый подарок на маркете**\n\n{link}\n\n🎁 **{gift_name}** `#{gift.num}`\n{price_stars}\n\n{u_info}"
             
-            btns = [[Button.inline("👤 Взять в работу", data=f"take_{uid}".encode()), 
-                     Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]]
+            # Вертикальное расположение кнопок для мобильных устройств
+            btns = [
+                [Button.inline("👤 Взять в работу", data=f"take_{uid}".encode())],
+                [Button.inline("🚫 Заблокировать", data=f"ban_{uid}".encode())]
+            ]
             
             await sent_msg.edit(final_text, buttons=btns, link_preview=True)
             logger.info(f"✅ Алерт отправлен: {gift_name} #{gift.num} для {u_name}")
