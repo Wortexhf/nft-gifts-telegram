@@ -1,58 +1,63 @@
 import os
 import sys
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 
 # Определяем путь к папке, где находится EXE или скрипт
 if getattr(sys, 'frozen', False):
-    # Если запущено как EXE
     SCRIPT_DIR = Path(sys.executable).parent
 else:
-    # Если запущено как скрипт
     SCRIPT_DIR = Path(__file__).parent.absolute()
 
-# Явно загружаем .env именно из этой папки
+# Явно загружаем .env
 ENV_PATH = SCRIPT_DIR / ".env"
-
-if not ENV_PATH.exists():
-    print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Файл .env не найден по пути: {ENV_PATH}")
-else:
-    # Используем override=True, чтобы точно переписать переменные окружения
-    load_dotenv(dotenv_path=ENV_PATH, override=True)
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 # Папка для данных
 DATA_DIR = SCRIPT_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-# Пути к системным файлам
+# Пути к файлам
 SESSION_FILE = DATA_DIR / "nft_gift_monitor.session"
+BOT_SESSION_PATH = DATA_DIR / "bot_instance"
 LOG_FILE = DATA_DIR / "monitor.log"
 STATS_FILE = DATA_DIR / "statistics.json"
 HISTORY_FILE = DATA_DIR / "listings_history.json"
+TOKEN_CACHE_FILE = DATA_DIR / "current_token.txt"
+
+# Проверка обязательных полей
+mandatory_fields = ['API_ID', 'API_HASH', 'BOT_TOKEN', 'GROUP_ID']
+missing = [f for f in mandatory_fields if not os.getenv(f)]
+
+if missing:
+    print("="*50)
+    print(f"❌ КРИТИЧЕСКАЯ ОШИБКА В .env ФАЙЛЕ!")
+    print(f"Отсутствуют или закомментированы обязательные параметры: {', '.join(missing)}")
+    print("Пожалуйста, откройте .env и заполните их.")
+    print("="*50)
+    sys.exit(1)
 
 # Telegram Auth
-# Используем .get() с дефолтным значением, чтобы избежать падения при конвертации
-API_ID_STR = os.getenv('API_ID')
-API_HASH = os.getenv('API_HASH')
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-GROUP_ID_STR = os.getenv('GROUP_ID')
-
-try:
-    API_ID = int(API_ID_STR) if API_ID_STR else 0
-except ValueError:
-    print("❌ ОШИБКА: API_ID в файле .env должен быть числом!")
-    API_ID = 0
-
-try:
-    GROUP_ID = int(GROUP_ID_STR) if GROUP_ID_STR else 0
-except ValueError:
-    print("❌ ОШИБКА: GROUP_ID в файле .env должен быть числом!")
-    GROUP_ID = 0
-
-API_HASH = API_HASH.strip('"\'') if API_HASH else None
-BOT_TOKEN = BOT_TOKEN.strip('"\'') if BOT_TOKEN else None
+API_ID = int(os.getenv('API_ID', 0))
+API_HASH = os.getenv('API_HASH', '').strip('"\' ')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '').strip('"\' ')
+GROUP_ID = int(os.getenv('GROUP_ID', 0))
 GROUP_INVITE = os.getenv('GROUP_INVITE')
-SESSION_NAME = str((DATA_DIR / "nft_gift_monitor").absolute())
+
+# ЛОГИКА СМЕНЫ БОТА: Если токен изменился, удаляем старую сессию бота
+try:
+    if TOKEN_CACHE_FILE.exists():
+        old_token = TOKEN_CACHE_FILE.read_text().strip()
+        if old_token != BOT_TOKEN:
+            print("🔄 Обнаружен новый токен бота. Сброс сессии...")
+            for f in DATA_DIR.glob("bot_instance*"):
+                try: f.unlink()
+                except: pass
+    TOKEN_CACHE_FILE.write_text(BOT_TOKEN)
+except: pass
+
+SESSION_NAME = str(SESSION_FILE.with_suffix(''))
 
 # Конфигурация мониторинга
 default_gifts = [
@@ -67,21 +72,20 @@ default_gifts = [
 
 env_gifts = os.getenv('TARGET_GIFT_NAMES')
 if env_gifts:
-    # Удаляем лапки, переносы строк и разделяем
     clean_gifts = env_gifts.replace('"', '').replace("'", "").replace('\n', ',')
     TARGET_GIFT_NAMES = [name.strip() for name in clean_gifts.split(',') if name.strip()]
 else:
     TARGET_GIFT_NAMES = default_gifts
 
 # === КОНФИГУРАЦИЯ АГРЕССИВНОГО РЕЖИМА ===
-BASE_SCAN_INTERVAL = (5, 10)      # Интервал сканирования (сек)
-CONCURRENT_REQUESTS = 5           # Параллельные запросы
-FETCH_LIMIT = 50                  # Глубина выборки лотов
-CONCURRENT_ALERTS = 10            # Скорость отправки уведомлений
+BASE_SCAN_INTERVAL = (5, 10)
+CONCURRENT_REQUESTS = 5
+FETCH_LIMIT = 50
+CONCURRENT_ALERTS = 10
 
 # Кэширование
-LISTING_MEMORY_HOURS = 48         # Сколько помнить лоты
-OWNER_CACHE_TTL_HOURS = 12        # Кэш владельцев (в часах)
+LISTING_MEMORY_HOURS = 48
+OWNER_CACHE_TTL_HOURS = 12
 OWNER_CACHE_MAX_SIZE = 5000
 
 # Безопасность и повторы
@@ -95,8 +99,8 @@ MAX_REQUEST_DELAY = 1.5
 BATCH_DELAY_MIN = 1.0             
 BATCH_DELAY_MAX = 3.0             
 
-# Предохранитель (Circuit Breaker)
-CIRCUIT_BREAKER_THRESHOLD = 5     # Порог ошибок перед остановкой
-CIRCUIT_BREAKER_TIMEOUT = 60      # Таймаут при блокировке (сек)
+# Предохранитель
+CIRCUIT_BREAKER_THRESHOLD = 5
+CIRCUIT_BREAKER_TIMEOUT = 60
 HEALTH_CHECK_INTERVAL = 15
 SAVE_STATS_INTERVAL = 60
