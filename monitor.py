@@ -195,7 +195,7 @@ class NFTMonitor:
             self.taken_users[uid_str] = clicker_name
             
             # 2. Prepare UI update
-            clean_text = re.sub(r'\n\n🔒 **Взял:.*', '', msg.text).strip()
+            clean_text = re.sub(r'\n\n🔒 \*\*Взял:.*\*\*', '', msg.text).strip()
             new_text = clean_text + f"\n\n🔒 **Взял:** {clicker_name}"
             new_buttons = [
                 [Button.inline(f"🔒 Взял: {clicker_name}", data=b"already_taken")],
