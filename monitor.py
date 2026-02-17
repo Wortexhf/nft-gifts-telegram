@@ -228,8 +228,10 @@ class NFTMonitor:
                 await event.edit(buttons=new_buttons, link_preview=True)
                 await event.answer(f"⚠️ Уже занято: {taken_by}", alert=True); return
 
+            # 1. Update memory state immediately
             self.taken_users[uid_str] = clicker_name
             
+            # 2. Prepare UI update
             clean_text = re.sub(r'\n\n🔒 \*\*Взял:.*\*\*', '', msg.text).strip()
             new_text = clean_text + f"\n\n🔒 **Взял:** {clicker_name}"
             
@@ -238,16 +240,61 @@ class NFTMonitor:
 
             new_buttons = [
                 [Button.inline(f"🔒 Взял: {clicker_name}", data=b"already_taken")],
+                [Button.inline("🛑 Прекратить работу", data=f"stop_{uid_str}".encode())],
                 [ban_btn]
             ]
             
+            # 3. Edit message and answer FIRST
             await event.edit(new_text, buttons=new_buttons, link_preview=True)
             await event.answer(f"✅ Вы взяли этого продавца!")
             
+            # 4. Save and log AFTER UI update
             self.save_taken_users()
             logger.info(f"✅ Продавец {uid_str} взят в работу пользователем {clicker_name}.")
         except Exception as e:
             logger.error(f"Ошибка в handle_take_callback: {e}")
+
+    async def handle_stop_callback(self, event):
+        try:
+            data = event.data.decode()
+            if not data.startswith("stop_"): return
+            uid_str = data.split("_")[1]
+            sender = await event.get_sender()
+            
+            if uid_str not in self.taken_users:
+                await event.answer("⚠️ Эта задача уже свободна.", alert=True); return
+            
+            taken_by = self.taken_users[uid_str]
+            clicker_name = f"@{sender.username}" if sender.username else sender.first_name
+            
+            # Security check: only the owner of the task can stop it
+            if taken_by != clicker_name:
+                await event.answer(f"⚠️ Эту работу может прекратить только {taken_by}", alert=True); return
+
+            # 1. Update memory state
+            del self.taken_users[uid_str]
+            
+            # 2. Prepare UI update
+            msg = await event.get_message()
+            clean_text = re.sub(r'\n\n🔒 \*\*Взял:.*\*\*', '', msg.text).strip()
+            
+            is_banned = int(uid_str) in self.banned_users
+            ban_btn = Button.inline("✅ Разблокировать", data=f"unban_{uid_str}".encode()) if is_banned else Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())
+            
+            new_buttons = [
+                [Button.inline("👤 Взять в работу", data=f"take_{uid_str}".encode())],
+                [ban_btn]
+            ]
+            
+            # 3. Edit and answer FIRST
+            await event.edit(clean_text, buttons=new_buttons, link_preview=True)
+            await event.answer("🛑 Работа прекращена. Лот снова свободен!", alert=True)
+            
+            # 4. Save changes
+            self.save_taken_users()
+            logger.info(f"🛑 Пользователь {clicker_name} прекратил работу с продавцом {uid_str}.")
+        except Exception as e:
+            logger.error(f"Ошибка в handle_stop_callback: {e}")
 
     async def handle_prof_callback(self, event):
         try:
