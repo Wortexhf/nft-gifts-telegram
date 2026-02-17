@@ -175,7 +175,7 @@ class NFTMonitor:
             data = event.data.decode()
             if not data.startswith("prof_"): return
             await event.answer("⚠️ Юзернейм отсутствует. Зайдите в профиль через окно подарка!", alert=True)
-        except Exception as e: logger.error(f"Prof error: {e}")
+        except Exception as e: logger.error(f"Ошибка профиля: {e}")
 
     async def handle_start(self, event):
         logger.info(f"📩 Получено сообщение /start. ID этого чата: {event.chat_id}")
@@ -199,7 +199,7 @@ class NFTMonitor:
                 self.owner_cache[uid] = (None, datetime.now()); return None
 
             full = await self.client(GetFullUserRequest(entity))
-            name = ((entity.first_name or "") + " " + (entity.last_name or "")).strip() or "Unknown"
+            name = ((entity.first_name or "") + " " + (entity.last_name or "")).strip() or "Неизвестно"
             
             premium = getattr(entity, 'premium', False)
             price = None
@@ -330,7 +330,7 @@ class NFTMonitor:
             u_mention = f"[{u_name}]({u_link})"
             
             u_info = f"👤 **Продавец:** {u_mention} `[{uid}]`\n"
-            u_info += f"⭐ **Статус:** {'Premium' if user_data['premium'] else 'Обычный'}\n"
+            u_info += f"⭐ **Статус:** {'Премиум' if user_data['premium'] else 'Обычный'}\n"
             if user_data['price']: 
                 u_info += f"💬 **Сообщения:** {user_data['price']} ⭐️"
 
