@@ -178,7 +178,8 @@ class NFTMonitor:
         except Exception as e: logger.error(f"Prof error: {e}")
 
     async def handle_start(self, event):
-        await event.respond("👋 **Бот активирован!**\nТеперь я смогу присылать вам ссылки на продавцов.")
+        logger.info(f"📩 Получено сообщение /start. ID этого чата: {event.chat_id}")
+        await event.respond(f"👋 **Бот активирован!**\nID этого чата: `{event.chat_id}`\nСкопируйте его в .env, если сообщения не приходят.")
 
     async def check_owner(self, owner_id) -> Optional[dict]:
         uid = owner_id.user_id if hasattr(owner_id, 'user_id') else owner_id if isinstance(owner_id, int) else None
@@ -291,7 +292,14 @@ class NFTMonitor:
             target_group = config.GROUP_ID
             try:
                 target_group = await self.bot_client.get_input_entity(config.GROUP_ID)
-            except: pass
+            except Exception as e:
+                # If ID fails and isn't -100 prepended, try that
+                if isinstance(config.GROUP_ID, int) and str(config.GROUP_ID).startswith("-") and not str(config.GROUP_ID).startswith("-100"):
+                    try:
+                        alt_id = int("-100" + str(config.GROUP_ID).lstrip("-"))
+                        target_group = await self.bot_client.get_input_entity(alt_id)
+                        logger.debug(f"ℹ️ Используем альтернативный ID группы: {alt_id}")
+                    except: pass
 
             sent_msg = await self.bot_client.send_message(target_group, msg_text, link_preview=True)
             if not sent_msg: return
@@ -327,10 +335,13 @@ class NFTMonitor:
             logger.error(f"Ошибка алерта: {e}")
             if sent_msg:
                 try: 
-                    target_group = config.GROUP_ID
-                    try: target_group = await self.bot_client.get_input_entity(config.GROUP_ID)
-                    except: pass
-                    await self.bot_client.delete_messages(target_group, [sent_msg.id])
+                    # Re-resolve group for deletion if needed
+                    t_group = config.GROUP_ID
+                    try: t_group = await self.bot_client.get_input_entity(config.GROUP_ID)
+                    except:
+                         if isinstance(config.GROUP_ID, int) and str(config.GROUP_ID).startswith("-") and not str(config.GROUP_ID).startswith("-100"):
+                             t_group = int("-100" + str(config.GROUP_ID).lstrip("-"))
+                    await self.bot_client.delete_messages(t_group, [sent_msg.id])
                 except: pass
 
     async def scan_all(self, gifts):
