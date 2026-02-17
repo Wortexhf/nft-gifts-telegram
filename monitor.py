@@ -142,15 +142,11 @@ class NFTMonitor:
             if not data.startswith("ban_"): return
             uid = int(data.split("_")[1])
             
+            # 1. Update memory state immediately
             self.banned_users.add(uid)
-            self.save_banned_users()
             
-            logger.info(f"🚫 Пользователь {uid} вручную добавлен в черный список.")
-            await event.answer("🚫 Пользователь заблокирован!", alert=True)
-            
+            # 2. Prepare UI update
             msg = await event.get_message()
-            
-            # Ищем, была ли уже кнопка "Взял", чтобы сохранить её статус
             status_btn = None
             if msg.buttons:
                 for row in msg.buttons:
@@ -160,16 +156,19 @@ class NFTMonitor:
                             break
             
             new_buttons = []
-            if status_btn:
-                new_buttons.append([status_btn])
-            
-            # Добавляем статусную кнопку бана
+            if status_btn: new_buttons.append([status_btn])
             new_buttons.append([Button.inline("🚫 Забанен", data=b"already_banned")])
             
             clean_text = re.sub(r'\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**', '', msg.text).strip()
             final_text = clean_text + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**"
             
-            await msg.edit(final_text, buttons=new_buttons, link_preview=True)
+            # 3. Edit message and answer callback FIRST (for speed)
+            await event.edit(final_text, buttons=new_buttons, link_preview=True)
+            await event.answer("🚫 Пользователь заблокирован!", alert=True)
+            
+            # 4. Save to disk and log AFTER UI update
+            self.save_banned_users()
+            logger.info(f"🚫 Пользователь {uid} вручную добавлен в черный список.")
         except Exception as e:
             logger.error(f"Ошибка в handle_ban_callback: {e}")
 
@@ -184,30 +183,32 @@ class NFTMonitor:
             msg = await event.get_message()
             
             if uid_str in self.taken_users:
-                # Если уже занято, просто обновляем кнопки, чтобы было видно кем
                 taken_by = self.taken_users[uid_str]
                 new_buttons = [
                     [Button.inline(f"🔒 Занято: {taken_by}", data=b"already_taken")],
                     [Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())]
                 ]
-                await msg.edit(buttons=new_buttons, link_preview=True)
+                await event.edit(buttons=new_buttons, link_preview=True)
                 await event.answer(f"⚠️ Уже занято: {taken_by}", alert=True); return
 
+            # 1. Update memory state immediately
             self.taken_users[uid_str] = clicker_name
-            self.save_taken_users()
-            logger.info(f"✅ Продавец {uid_str} взят в работу пользователем {clicker_name}.")
-            await event.answer(f"✅ Вы взяли этого продавца!")
             
+            # 2. Prepare UI update
             clean_text = re.sub(r'\n\n🔒 **Взял:.*', '', msg.text).strip()
             new_text = clean_text + f"\n\n🔒 **Взял:** {clicker_name}"
-            
-            # Заменяем кнопку на статусную
             new_buttons = [
                 [Button.inline(f"🔒 Взял: {clicker_name}", data=b"already_taken")],
                 [Button.inline("🚫 Заблокировать", data=f"ban_{uid_str}".encode())]
             ]
             
-            await msg.edit(new_text, buttons=new_buttons, link_preview=True)
+            # 3. Edit message and answer FIRST
+            await event.edit(new_text, buttons=new_buttons, link_preview=True)
+            await event.answer(f"✅ Вы взяли этого продавца!")
+            
+            # 4. Save and log AFTER UI update
+            self.save_taken_users()
+            logger.info(f"✅ Продавец {uid_str} взят в работу пользователем {clicker_name}.")
         except Exception as e:
             logger.error(f"Ошибка в handle_take_callback: {e}")
 
