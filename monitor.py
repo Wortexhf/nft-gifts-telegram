@@ -139,14 +139,39 @@ class NFTMonitor:
     async def handle_ban_callback(self, event):
         try:
             data = event.data.decode()
+            if not data.startswith("ban_"): return
             uid = int(data.split("_")[1])
+            
             self.banned_users.add(uid)
             self.save_banned_users()
+            
             logger.info(f"🚫 Пользователь {uid} вручную добавлен в черный список.")
             await event.answer("🚫 Пользователь заблокирован!", alert=True)
+            
             msg = await event.get_message()
-            await msg.edit(msg.text + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**", buttons=None, link_preview=True)
-        except: pass
+            
+            # Ищем, была ли уже кнопка "Взял", чтобы сохранить её статус
+            status_btn = None
+            if msg.buttons:
+                for row in msg.buttons:
+                    for btn in row:
+                        if btn.data and b"already_taken" in btn.data:
+                            status_btn = btn
+                            break
+            
+            new_buttons = []
+            if status_btn:
+                new_buttons.append([status_btn])
+            
+            # Добавляем статусную кнопку бана
+            new_buttons.append([Button.inline("🚫 Забанен", data=b"already_banned")])
+            
+            clean_text = re.sub(r'\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**', '', msg.text).strip()
+            final_text = clean_text + "\n\n🚫 **АВТОР ЗАБЛОКИРОВАН**"
+            
+            await msg.edit(final_text, buttons=new_buttons, link_preview=True)
+        except Exception as e:
+            logger.error(f"Ошибка в handle_ban_callback: {e}")
 
     async def handle_take_callback(self, event):
         try:
@@ -313,6 +338,10 @@ class NFTMonitor:
                 logger.debug(f"Ошибка сканирования {gift_name}: {e}")
 
     async def immediate_alert(self, gift, gift_name, uid):
+        if uid in self.banned_users:
+            logger.info(f"🚫 Лот пропущен (автор {uid} в черном списке)")
+            return
+
         sent_msg = None
         try:
             link = f"https://t.me/nft/{gift.slug}-{gift.num}"
