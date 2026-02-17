@@ -2,7 +2,6 @@
 __pycache__/
 *.py[cod]
 *$py.class
-.env
 .venv
 env/
 venv/
@@ -14,3 +13,8 @@ data/
 *.log
 *.json
 scrape_telegram_nft.py
+
+# PyInstaller
+build/
+dist/
+*.spec
