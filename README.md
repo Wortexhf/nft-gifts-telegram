@@ -1,53 +1,63 @@
 # 🎁 Telegram NFT Gift Monitor
 
-Профессиональный инструмент для мониторинга вторичного рынка NFT подарков в Telegram. Бот отслеживает появление новых лотов и мгновенно присылает уведомления в вашу рабочую группу.
+A professional tool for monitoring the secondary market of NFT gifts in Telegram. The bot tracks new listings and instantly sends notifications to your working group.
 
-## ✨ Основные возможности
-*   🚀 **Ультра-быстрое сканирование**: Минимальные задержки между появлением лота и алертом.
-*   👤 **Информация о продавце**: Автоматическое получение данных: статус Premium, цена за сообщения, прямая ссылка на профиль.
-*   🛡️ **Умная фильтрация**: Бот игнорирует удаленные аккаунты, "призраков" (без фото и юзернейма) и пользователей из черного списка.
-*   👥 **Командная работа**:
-    *   Кнопка **"👤 Взять в работу"**: Помечает лот как занятый вами.
-    *   Кнопка **"🛑 Прекратить работу"**: Освобождает лот, если вы передумали (доступно только владельцу задачи).
-    *   Кнопка **"🚫 Заблокировать"**: Добавляет продавца в черный список прямо из чата.
-*   📱 **Мобильная адаптация**: Вертикальное расположение кнопок для удобного использования с телефона.
-*   ⚙️ **Внешняя конфигурация**: Настройка API, токенов и списка подарков через файл `.env` без доступа к коду.
+## ✨ Key Features
 
-## 🛠 Установка и запуск
+- 🚀 **Ultra-fast scanning**: Minimal delay between a listing appearing and an alert being sent.
+- 👤 **Seller information**: Automatically retrieves data: Premium status, messaging price, and a direct profile link.
+- 🛡️ **Smart filtering**: The bot ignores deleted accounts, "ghosts" (no photo or username), and blacklisted users.
+- 👥 **Team collaboration**:
+  - **"👤 Take on"** button: Marks a listing as being handled by you.
+  - **"🛑 Release"** button: Frees up the listing if you changed your mind (only available to the task owner).
+  - **"🚫 Ban"** button: Adds the seller to the blacklist directly from the chat.
+- 📱 **Mobile-friendly**: Vertically arranged buttons for comfortable use on a phone.
+- ⚙️ **External configuration**: API keys, tokens, and gift lists are configured via a `.env` file without touching the code.
 
-1.  **Подготовка**:
-    *   Сделайте копию файла `.env.example` и назовите её `.env`.
-    *   Заполните ваши `API_ID`, `API_HASH` (с [my.telegram.org](https://my.telegram.org)) и `BOT_TOKEN` (от [@BotFather](https://t.me/BotFather)).
-    *   Укажите `GROUP_ID` вашей группы (должен начинаться с `-100`).
+## 🛠 Installation & Setup
 
-2.  **Запуск через Python**:
-    ```bash
-    pip install -r requirements.txt
-    python main.py
-    ```
+1. **Preparation**:
+   - Make a copy of the `.env.example` file and rename it `.env`.
+   - Fill in your `API_ID`, `API_HASH` (from [my.telegram.org](https://my.telegram.org)) and `BOT_TOKEN` (from [@BotFather](https://t.me/BotFather)).
+   - Set your `GROUP_ID` (must start with `-100`).
 
-3.  **Использование EXE-версии**:
-    Если у вас есть скомпилированный файл, просто положите его рядом с `.env` и запустите.
+2. **Running with Python**:
+   ```bash
+   pip install -r requirements.txt
+   python main.py
+   ```
 
-## 📝 Настройка мониторинга
-В файле `.env` в параметре `TARGET_GIFT_NAMES` вы можете через запятую перечислить названия подарков, которые нужно искать. Например:
-`TARGET_GIFT_NAMES = "Heart Locket, Durov's Cap, Astral Shard"`
+3. **Using the EXE version**:
+   If you have a compiled file, simply place it next to your `.env` file and run it.
 
-Если оставить поле пустым, бот будет искать все популярные типы подарков по умолчанию.
+## 📝 Monitoring Configuration
 
-## 📦 Создание EXE файла (Компиляция)
-Если вы хотите запускать монитор без установки Python или передать его другому человеку (скрыв исходный код), вы можете скомпилировать его в один исполняемый файл:
+In the `.env` file, use the `TARGET_GIFT_NAMES` parameter to list the gift names you want to track, separated by commas. For example:
 
-1. Установите PyInstaller: `pip install pyinstaller`
-2. Выполните команду:
+```
+TARGET_GIFT_NAMES = "Heart Locket, Durov's Cap, Astral Shard"
+```
+
+If left empty, the bot will search for all popular gift types by default.
+
+## 📦 Building an EXE (Compilation)
+
+If you want to run the monitor without installing Python, or share it with someone else while hiding the source code, you can compile it into a single executable:
+
+1. Install PyInstaller:
+   ```bash
+   pip install pyinstaller
+   ```
+2. Run the build command:
    ```bash
    python -m PyInstaller --onefile --console --name NFT_Monitor main.py
    ```
-3. Готовый файл появится в папке `dist/`.
+3. The compiled file will appear in the `dist/` folder.
 
-**Важно**: Положите созданный `NFT_Monitor.exe` в папку с вашим файлом `.env` перед запуском.
+> **Important**: Place the generated `NFT_Monitor.exe` in the same folder as your `.env` file before running.
 
-## 🗄 Хранение данных
-*   Вся статистика, сессии и черные списки хранятся в папке `data/`. 
-*   **Важно**: Не удаляйте файл `banned_users.json`, если хотите сохранить черный список.
-*   **Смена бота**: Если вы измените `BOT_TOKEN` в `.env`, программа автоматически сбросит старую сессию при следующем запуске.
+## 🗄 Data Storage
+
+- All statistics, sessions, and blacklists are stored in the `data/` folder.
+- **Important**: Do not delete `banned_users.json` if you want to keep your blacklist.
+- **Changing the bot**: If you update `BOT_TOKEN` in `.env`, the program will automatically reset the old session on the next launch.
