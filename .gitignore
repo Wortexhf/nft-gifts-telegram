@@ -18,3 +18,7 @@ scrape_telegram_nft.py
 build/
 dist/
 *.spec
+.cache
+.cache.json
+.cache/
+
